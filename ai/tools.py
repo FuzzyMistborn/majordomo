@@ -197,6 +197,15 @@ TOOL_DEFINITIONS = [
             "parameters": {"type": "object", "properties": {"note_id": {"type": "integer"}}, "required": ["note_id"]},
         },
     },
+    # ── Weather ──
+    {
+        "type": "function",
+        "function": {
+            "name": "ha_get_weather",
+            "description": "Get current weather conditions and forecast from Home Assistant.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
     # ── Web Search ──
     {
         "type": "function",
@@ -500,6 +509,33 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
                     loc = f" ({e['location']})" if e.get("location") else ""
                     desc = f"\n  _{e['description']}_" if e.get("description") else ""
                     lines.append(f"• {time_str} — {e['summary']}{loc}{desc}")
+                return "\n".join(lines)
+
+            case "ha_get_weather":
+                if not (Config.HA_URL and Config.HA_TOKEN):
+                    return "Home Assistant is not configured."
+                if not Config.HA_WEATHER_ENTITY:
+                    return "Weather entity not configured. Set HA_WEATHER_ENTITY in your environment."
+                weather = await ha.get_weather()
+                temp = f"{weather['temperature']}{weather['temperature_unit']}" if weather.get("temperature") is not None else "unknown"
+                wind = f"{weather['wind_speed']}{weather['wind_speed_unit']}" if weather.get("wind_speed") is not None else "unknown"
+                humidity = f"{weather['humidity']}%" if weather.get("humidity") is not None else "unknown"
+                lines = [
+                    f"Condition: {weather['condition']}",
+                    f"Temperature: {temp}",
+                    f"Humidity: {humidity}",
+                    f"Wind: {wind}",
+                ]
+                forecast = weather.get("forecast", [])
+                if forecast:
+                    lines.append("Forecast:")
+                    for entry in forecast:
+                        dt = entry.get("datetime", "")
+                        date_str = dt[:10] if dt else "?"
+                        high = entry.get("temperature", "?")
+                        low = entry.get("templow", "?")
+                        condition = entry.get("condition", "?")
+                        lines.append(f"  {date_str}: {condition}, high {high}, low {low}")
                 return "\n".join(lines)
 
             case _:

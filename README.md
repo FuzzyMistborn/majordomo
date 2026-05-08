@@ -13,7 +13,7 @@ The bot has a personality: it responds as **Wit** (Hoid), an ancient, sardonic f
 - **Smart reminders** — recurring reminders that run an AI prompt at fire time (e.g. a daily morning briefing that fetches your calendar and active reminders)
 - **Notes** — create with tags, search by keyword, update, delete
 - **Web search** — via Tavily, summarised by the AI with top links
-- **Home Assistant** — query entity states, turn on/off/toggle devices, call any service, read calendar events
+- **Home Assistant** — query entity states, turn on/off/toggle devices, call any service, read calendar events, fetch weather
 - **User whitelist** — only allowed Telegram user IDs can interact
 
 ---
@@ -112,6 +112,7 @@ HA_CALENDARS=calendar.personal,calendar.family
 | `HA_TOKEN` | — | _(disabled)_ | HA long-lived access token |
 | `HA_ALLOWED_DOMAINS` | — | `light,switch,...` | HA domains the bot may control |
 | `HA_CALENDARS` | — | _(disabled)_ | Comma-separated HA calendar entity IDs |
+| `HA_WEATHER_ENTITY` | — | _(disabled)_ | HA weather entity ID (e.g. `weather.home`) |
 | `TIMEZONE` | — | `UTC` | IANA timezone for reminders (e.g. `America/New_York`) |
 | `HISTORY_WINDOW` | — | `20` | Conversation messages to retain per user |
 | `DB_PATH` | — | `/data/bot.db` | SQLite database path inside the container |

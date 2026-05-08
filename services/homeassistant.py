@@ -126,6 +126,36 @@ async def get_calendar_events(start: str, end: str) -> list[dict]:
     return all_events
 
 
+async def get_weather() -> dict:
+    """Fetch current weather and today's forecast from the configured weather entity."""
+    if not _enabled():
+        raise RuntimeError("Home Assistant is not configured.")
+    if not Config.HA_WEATHER_ENTITY:
+        raise RuntimeError("HA_WEATHER_ENTITY is not configured.")
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"{_base()}/api/states/{Config.HA_WEATHER_ENTITY}",
+            headers=_headers(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    attrs = data.get("attributes", {})
+    result = {
+        "condition": data.get("state", "unknown"),
+        "temperature": attrs.get("temperature"),
+        "temperature_unit": attrs.get("temperature_unit", ""),
+        "humidity": attrs.get("humidity"),
+        "wind_speed": attrs.get("wind_speed"),
+        "wind_speed_unit": attrs.get("wind_speed_unit", ""),
+        "friendly_name": attrs.get("friendly_name", Config.HA_WEATHER_ENTITY),
+    }
+    # Include today's forecast entries if available
+    forecast = attrs.get("forecast", [])
+    if forecast:
+        result["forecast"] = forecast[:5]
+    return result
+
+
 # Stub to satisfy main.py import
 async def fetch_ha_tools() -> list:
     return []

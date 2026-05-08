@@ -31,6 +31,8 @@ class Config:
         if d.strip()
     ]
 
+    HA_WEATHER_ENTITY: str = os.environ.get("HA_WEATHER_ENTITY", "")
+
     # Database
     DB_PATH: str = os.environ.get("DB_PATH", "/data/bot.db")
 
