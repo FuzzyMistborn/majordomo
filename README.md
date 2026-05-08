@@ -1,26 +1,29 @@
-# Ollama Telegram Bot
+# Majordomo
 
-A local-only AI assistant Telegram bot powered by Ollama (Gemma / any tool-capable model).
+A self-hosted Telegram bot powered by Ollama. Manages to-do lists, reminders, notes, web search, and Home Assistant control — all via natural language. Runs entirely on your own infrastructure; nothing leaves your network except Telegram API calls and Tavily search queries.
+
+The bot has a personality: it responds as **Wit** (Hoid), an ancient, sardonic figure who finds the work beneath him but does it anyway, with style.
+
+---
 
 ## Features
 
-- 📋 **To-do lists** — create multiple named lists, add/update/check-off/delete items
-- ⏰ **Reminders** — one-shot and recurring, persisted across restarts
-- 📝 **Notes** — create, search by keyword, update, delete
-- 🔍 **Web search** — via Kagi Search API, summarised by the AI
-- 🏠 **Home Assistant** — query entity states, toggle/turn on/off devices
-- 🔒 **User whitelist** — only allowed Telegram user IDs can interact
-
-All data is stored locally in a SQLite database. Nothing leaves your network except Telegram API calls and Kagi search queries.
+- **To-do lists** — multiple named lists; add, update, check off, delete items
+- **Reminders** — one-shot and recurring, persisted across restarts
+- **Smart reminders** — recurring reminders that run an AI prompt at fire time (e.g. a daily morning briefing that fetches your calendar and active reminders)
+- **Notes** — create with tags, search by keyword, update, delete
+- **Web search** — via Tavily, summarised by the AI with top links
+- **Home Assistant** — query entity states, turn on/off/toggle devices, call any service, read calendar events
+- **User whitelist** — only allowed Telegram user IDs can interact
 
 ---
 
 ## Requirements
 
 - Docker + Docker Compose
-- [Ollama](https://ollama.ai) running on your host with a tool-capable model pulled
+- [Ollama](https://ollama.ai) running somewhere accessible with a tool-capable model pulled
 - A Telegram bot token (from [@BotFather](https://t.me/BotFather))
-- A [Kagi API key](https://kagi.com/settings?p=api)
+- A [Tavily API key](https://app.tavily.com) (free tier: 1 000 queries/month)
 
 ---
 
@@ -32,8 +35,7 @@ All data is stored locally in a SQLite database. Nothing leaves your network exc
 ollama pull gemma3:4b
 ```
 
-> **Important:** The model must support tool/function calling. Confirmed working:
-> `gemma3:4b`, `llama3.1`, `llama3.2`, `qwen2.5`, `mistral-nemo`
+The model must support tool/function calling. Confirmed working: `gemma3:4b`, `llama3.1`, `llama3.2`, `qwen2.5`, `mistral-nemo`.
 
 ### 2. Configure environment
 
@@ -42,12 +44,7 @@ cp .env.example .env
 # Edit .env with your values
 ```
 
-Key values to set:
-- `TELEGRAM_TOKEN` — from @BotFather
-- `ALLOWED_USER_IDS` — your Telegram user ID (get it from [@userinfobot](https://t.me/userinfobot))
-- `KAGI_API_KEY` — from your Kagi account settings
-- `TIMEZONE` — IANA timezone string (e.g. `America/New_York`)
-- `HA_URL` + `HA_TOKEN` — optional, for Home Assistant control
+See [Configuration Reference](#configuration-reference) below for all variables.
 
 ### 3. Build and run
 
@@ -58,16 +55,18 @@ docker compose logs -f
 
 ---
 
-## Usage Examples
+## Usage
 
-Just send natural language messages:
+Just send natural language messages. Examples:
 
 | What you say | What happens |
 |---|---|
 | `"Remind me to take meds at 8am every day"` | Creates a recurring daily reminder |
+| `"Every morning at 7am give me a summary of my day"` | Creates a smart recurring reminder that fetches calendar + reminders at fire time |
 | `"Add eggs to my shopping list"` | Adds to the 'shopping' list (creates it if needed) |
-| `"Create a note called Server Setup with the steps I just sent"` | Creates a note |
-| `"Search for the latest Fedora Kinoite release"` | Searches Kagi, returns summary + links |
+| `"What's on my calendar this week?"` | Fetches events from your HA calendars |
+| `"Create a note called Server Setup with the steps I just sent"` | Creates a tagged note |
+| `"Search for the latest Fedora Kinoite release"` | Searches Tavily, returns summary + links |
 | `"Turn off the living room lights"` | Calls HA service |
 | `"What reminders do I have?"` | Lists active reminders |
 | `"Mark the eggs item as done"` | Checks off the item |
@@ -84,13 +83,18 @@ Just send natural language messages:
 
 The bot uses HA's REST API with a long-lived access token.
 
-To generate a token:
+**Generating a token:**
 1. Go to your HA profile → Security → Long-lived access tokens
 2. Create a token and add it to `HA_TOKEN` in your `.env`
 
-Control is limited to the domains listed in `HA_ALLOWED_DOMAINS`. The default is:
+**Device control** is limited to the domains listed in `HA_ALLOWED_DOMAINS`. The default is:
 ```
-light,switch,input_boolean,script,automation
+light,switch,input_boolean,script,automation,climate,cover,fan,media_player
+```
+
+**Calendar integration** requires setting `HA_CALENDARS` to a comma-separated list of calendar entity IDs from your HA instance (e.g. calendar entities from Nextcloud, Google Calendar, etc.):
+```
+HA_CALENDARS=calendar.personal,calendar.family
 ```
 
 ---
@@ -99,16 +103,18 @@ light,switch,input_boolean,script,automation
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `TELEGRAM_TOKEN` | ✅ | — | Telegram bot token |
+| `TELEGRAM_TOKEN` | ✅ | — | Telegram bot token (from @BotFather) |
 | `ALLOWED_USER_IDS` | ✅ | — | Comma-separated Telegram user IDs |
-| `KAGI_API_KEY` | ✅ | — | Kagi Search API key |
-| `OLLAMA_HOST` | — | `http://host.docker.internal:11434` | Ollama URL |
-| `OLLAMA_MODEL` | — | `gemma3:4b` | Model name |
-| `HA_URL` | — | _(disabled)_ | Home Assistant URL |
-| `HA_TOKEN` | — | _(disabled)_ | HA long-lived token |
-| `HA_ALLOWED_DOMAINS` | — | `light,switch,...` | Allowed HA domains |
-| `TIMEZONE` | — | `UTC` | IANA timezone for reminders |
-| `HISTORY_WINDOW` | — | `20` | Conversation messages to retain |
+| `TAVILY_API_KEY` | ✅ | — | Tavily Search API key |
+| `OLLAMA_HOST` | — | `http://host.docker.internal:11434` | Ollama instance URL |
+| `OLLAMA_MODEL` | — | `gemma3:4b` | Model name (must support tool calling) |
+| `HA_URL` | — | _(disabled)_ | Home Assistant base URL |
+| `HA_TOKEN` | — | _(disabled)_ | HA long-lived access token |
+| `HA_ALLOWED_DOMAINS` | — | `light,switch,...` | HA domains the bot may control |
+| `HA_CALENDARS` | — | _(disabled)_ | Comma-separated HA calendar entity IDs |
+| `TIMEZONE` | — | `UTC` | IANA timezone for reminders (e.g. `America/New_York`) |
+| `HISTORY_WINDOW` | — | `20` | Conversation messages to retain per user |
+| `DB_PATH` | — | `/data/bot.db` | SQLite database path inside the container |
 
 ---
 
@@ -117,9 +123,15 @@ light,switch,input_boolean,script,automation
 The SQLite database is stored in a Docker volume at `/data/bot.db`. To back it up:
 
 ```bash
-docker run --rm -v ollama-telegram-bot_bot_data:/data -v $(pwd):/backup \
+docker run --rm -v majordomo_bot_data:/data -v $(pwd):/backup \
   alpine cp /data/bot.db /backup/bot-backup.db
 ```
+
+---
+
+## Personality
+
+The bot's voice is defined in `personality.md`. By default it responds as Wit (Hoid from the Cosmere) — dry, sardonic, brief. You can replace `personality.md` with any system prompt to change the character entirely.
 
 ---
 
@@ -129,14 +141,18 @@ docker run --rm -v ollama-telegram-bot_bot_data:/data -v $(pwd):/backup \
 - Ensure your Ollama model supports tool calling. Not all models do.
 - Try `llama3.1:8b` or `qwen2.5:7b` if `gemma3:4b` is unreliable.
 
-**"Could not reach the AI model"**
+**"Sorry, I couldn't reach the AI model"**
 - Verify Ollama is running: `ollama list`
 - Check `OLLAMA_HOST` — from inside Docker, use `http://host.docker.internal:11434`
 
 **Reminders not firing**
-- Check the container timezone matches `TIMEZONE` env var
+- Check the container timezone matches `TIMEZONE`
 - View logs: `docker compose logs -f`
 
 **Can't control HA entities**
 - Confirm the entity's domain is in `HA_ALLOWED_DOMAINS`
 - Test the HA token: `curl -H "Authorization: Bearer TOKEN" http://HA_URL/api/`
+
+**Calendar returns nothing**
+- Set `HA_CALENDARS` to the exact calendar entity IDs from your HA instance
+- Confirm `HA_URL` and `HA_TOKEN` are set correctly
