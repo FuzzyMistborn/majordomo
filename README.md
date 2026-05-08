@@ -14,6 +14,7 @@ The bot has a personality: it responds as **Wit** (Hoid), an ancient, sardonic f
 - **Notes** — create with tags, search by keyword, update, delete
 - **Web search** — via Tavily, summarised by the AI with top links
 - **Home Assistant** — query entity states, turn on/off/toggle devices, call any service, read calendar events, fetch weather
+- **AnyList** — read shopping list items and query the meal plan for any date range
 - **User whitelist** — only allowed Telegram user IDs can interact
 
 ---
@@ -96,6 +97,22 @@ light,switch,input_boolean,script,automation,climate,cover,fan,media_player
 
 ---
 
+## AnyList
+
+The bot reads shopping lists and meal plans directly from AnyList using the [pyanylist](https://github.com/ozonejunkieau/pyanylist) library.
+
+Set `ANYLIST_EMAIL` and `ANYLIST_PASSWORD` in your `.env`. The bot logs in once on first use and reuses the session.
+
+**Shopping lists** — unchecked items are returned by default:
+> "What's on my grocery list?"
+> "Show me everything on the shopping list including checked items"
+
+**Meal plan** — fetched via AnyList's iCalendar feed:
+> "What's for dinner tonight?"
+> "What meals are planned this week?"
+
+---
+
 ## Configuration Reference
 
 | Variable | Required | Default | Description |
@@ -109,6 +126,8 @@ light,switch,input_boolean,script,automation,climate,cover,fan,media_player
 | `HA_TOKEN` | — | _(disabled)_ | HA long-lived access token |
 | `HA_ALLOWED_DOMAINS` | — | `light,switch,...` | HA domains the bot may control |
 | `HA_WEATHER_ENTITY` | — | _(disabled)_ | HA weather entity ID (e.g. `weather.home`) |
+| `ANYLIST_EMAIL` | — | _(disabled)_ | AnyList account email |
+| `ANYLIST_PASSWORD` | — | _(disabled)_ | AnyList account password |
 | `CALDAV_URL` | — | _(disabled)_ | CalDAV server URL (e.g. `https://nextcloud.example.com/remote.php/dav`) |
 | `CALDAV_USERNAME` | — | _(disabled)_ | CalDAV username |
 | `CALDAV_PASSWORD` | — | _(disabled)_ | CalDAV password or app token |

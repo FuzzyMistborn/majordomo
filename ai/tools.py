@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import database as db
 import scheduler as sched
 from config import Config
+from services import anylist as anylist_service
 from services import calendar as cal_service
 from services import homeassistant as ha
 from services import search as search_service
@@ -21,6 +22,29 @@ def _normalize_list_name(name: str) -> str:
     """Strip trailing 'list'/'lists' that models often append."""
     import re
     return re.sub(r"\s+lists?$", "", name, flags=re.IGNORECASE).strip()
+
+
+def _normalize_reminder_message(msg: str) -> str:
+    import re
+    return re.sub(r"^(?:remind(?:er)?(?:\s+me)?(?:\s+to)?[\s:]+)", "", msg, flags=re.IGNORECASE).strip()
+
+
+def _parse_snooze_duration(s: str) -> int | None:
+    """Parse a human duration string into minutes. Returns None if unparseable."""
+    import re
+    s = s.lower().strip()
+    patterns = [
+        (r'(\d+)\s*(?:days?|d\b)', 24 * 60),
+        (r'(\d+)\s*(?:hours?|hrs?|h\b)', 60),
+        (r'(\d+)\s*(?:minutes?|mins?|m\b)(?!onths?)', 1),
+    ]
+    total = 0
+    matched = False
+    for pattern, mult in patterns:
+        for m in re.finditer(pattern, s):
+            total += int(m.group(1)) * mult
+            matched = True
+    return int(total) if matched and total > 0 else None
 
 
 def _now_local() -> datetime:
@@ -160,6 +184,26 @@ TOOL_DEFINITIONS = [
             "name": "reminder_delete",
             "description": "Delete a reminder by ID.",
             "parameters": {"type": "object", "properties": {"reminder_id": {"type": "integer"}}, "required": ["reminder_id"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reminder_snooze",
+            "description": (
+                "Snooze a reminder — reschedule it to fire again after a delay. "
+                "Call with just duration (e.g. '10 minutes') to snooze the most recently fired reminder. "
+                "If duration is omitted, ask the user how long to snooze. "
+                "Optionally provide reminder_id to snooze a specific reminder by ID."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "duration": {"type": "string", "description": "How long to snooze, e.g. '10 minutes', '1 hour'. Omit to ask."},
+                    "reminder_id": {"type": "integer", "description": "ID of the reminder to snooze. Defaults to the most recently fired one."},
+                },
+                "required": [],
+            },
         },
     },
     # ── Memory ──
@@ -349,6 +393,37 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    # ── AnyList ──
+    {
+        "type": "function",
+        "function": {
+            "name": "anylist_get_list",
+            "description": "Get items on an AnyList shopping list. If list_name is given, returns unchecked items in that list (pass include_checked=true for all). If list_name is omitted, returns the names of all available lists.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "list_name": {"type": "string", "description": "Name of the shopping list (e.g. 'Groceries'). Omit to list all available lists."},
+                    "include_checked": {"type": "boolean", "description": "Include already-checked/crossed-off items. Default false."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "anylist_get_meal_plan",
+            "description": "Get the meal plan from AnyList for a date range. Use when the user asks what's for dinner, what meals are planned, etc. start and end are ISO 8601 dates (YYYY-MM-DD).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start": {"type": "string", "description": "Start date ISO 8601 e.g. 2026-05-08"},
+                    "end": {"type": "string", "description": "End date ISO 8601, inclusive. Defaults to start (single day)."},
+                },
+                "required": ["start"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -457,6 +532,11 @@ def _normalize_calendar_args(args: dict) -> dict:
     if "calendar_name" in args and args["calendar_name"]:
         args["calendar_name"] = args["calendar_name"].strip()
 
+    # Fix hallucinated years in any date field
+    for field in ("start", "end", "new_start", "new_end"):
+        if isinstance(args.get(field), str):
+            args[field] = _fix_year(args[field])
+
     return args
 
 
@@ -467,6 +547,20 @@ _TOOL_ALIASES: dict[str, str] = {
     "list_events": "get_calendar_events",
     "getcalendarevents": "get_calendar_events",
     "listcalendarevents": "get_calendar_events",
+    # anylist aliases
+    "get_shopping_list": "anylist_get_list",
+    "get_list": "anylist_get_list",
+    "shopping_list": "anylist_get_list",
+    "get_meal_plan": "anylist_get_meal_plan",
+    "get_meals": "anylist_get_meal_plan",
+    "get_dinner": "anylist_get_meal_plan",
+    "whats_for_dinner": "anylist_get_meal_plan",
+    # reminder aliases
+    "create_reminder": "reminder_create",
+    "add_reminder": "reminder_create",
+    "set_reminder": "reminder_create",
+    "snooze_reminder": "reminder_snooze",
+    "snooze": "reminder_snooze",
     # memory aliases
     "store_memory": "memory_save",
     "save_memory": "memory_save",
@@ -476,7 +570,53 @@ _TOOL_ALIASES: dict[str, str] = {
 }
 
 
+def _normalize_reminder_args(args: dict) -> dict:
+    """Coerce various model-invented parameter shapes into a valid fire_at ISO string."""
+    from datetime import timedelta
+    if "fire_at" in args:
+        args["fire_at"] = _fix_year(args["fire_at"])
+        return args
+
+    now = _now_local()
+
+    # Relative minute/hour offsets the model sometimes invents
+    minutes = 0
+    for key in ("time_minutes", "minutes", "delay_minutes", "offset_minutes", "in_minutes"):
+        if key in args:
+            try:
+                minutes += int(args.pop(key))
+            except (ValueError, TypeError):
+                pass
+    for key in ("time_hours", "hours", "delay_hours", "in_hours"):
+        if key in args:
+            try:
+                minutes += int(args.pop(key)) * 60
+            except (ValueError, TypeError):
+                pass
+    if minutes:
+        args["fire_at"] = (now + timedelta(minutes=minutes)).isoformat()
+        return args
+
+    # Model passed a "time" or "datetime" field with an ISO string or partial string
+    for key in ("time", "datetime", "at", "scheduled_time", "fire_time", "reminder_time"):
+        val = args.pop(key, None)
+        if val and isinstance(val, str):
+            val = _fix_year(val)
+            # If it's a time-only string like "14:30", combine with today's date
+            import re as _re
+            if _re.match(r"^\d{2}:\d{2}(:\d{2})?$", val.strip()):
+                val = now.strftime("%Y-%m-%d") + "T" + val.strip()
+            args["fire_at"] = val
+            return args
+
+    return args
+
+
 async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
+    # Strip namespace prefix (e.g. "reminder_api.create_reminder" -> "create_reminder")
+    if "." in name:
+        name = name.rsplit(".", 1)[-1]
+
     # Resolve method-dispatch pattern: model passes method='delete_event' as an arg
     if "method" in args:
         method_val = str(args.pop("method")).lower().replace(" ", "_")
@@ -491,6 +631,10 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
     # Normalize calendar parameter names regardless of which alias was used
     if any(x in name for x in ("calendar", "event")):
         args = _normalize_calendar_args(args)
+
+    # Normalize reminder args (flexible fire_at, year fix)
+    if name == "reminder_create":
+        args = _normalize_reminder_args(args)
 
     try:
         match name:
@@ -553,21 +697,41 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
 
             # ── Reminders ──
             case "reminder_create":
+                if "fire_at" not in args:
+                    return "Error: reminder_create requires fire_at as an ISO 8601 datetime (e.g. 2026-05-08T15:30:00)."
                 fire_at_str = args["fire_at"]
                 _parse_datetime(fire_at_str)
                 smart = bool(args.get("smart", False))
+                message = _normalize_reminder_message(args["message"])
                 reminder = await db.create_reminder(
                     user_id=user_id,
-                    message=args["message"],
+                    message=message,
                     fire_at=fire_at_str,
                     recurrence=args.get("recurrence"),
                     recurrence_human=args.get("recurrence_human"),
                     smart=smart,
                 )
                 await sched.schedule_reminder(reminder)
-                human = reminder.get("recurrence_human") or f"at {fire_at_str}"
+                if reminder.get("recurrence_human"):
+                    human = reminder["recurrence_human"]
+                else:
+                    fire_dt = _parse_datetime(fire_at_str)
+                    now = _now_local()
+                    delta_mins = int((fire_dt - now).total_seconds() / 60)
+                    if 0 < delta_mins < 60:
+                        human = f"in {delta_mins} minute{'s' if delta_mins != 1 else ''}"
+                    elif 60 <= delta_mins < 120:
+                        human = "in 1 hour"
+                    elif 120 <= delta_mins < 1440:
+                        human = f"in {delta_mins // 60} hours"
+                    else:
+                        time_str = fire_dt.strftime("%I:%M %p").lstrip("0")
+                        date_str = ""
+                        if fire_dt.date() != now.date():
+                            date_str = " on " + fire_dt.strftime("%A, %B %-d")
+                        human = f"at {time_str}{date_str}"
                 kind = "Smart reminder" if smart else "Reminder"
-                return f"{kind} created (id={reminder['id']}): '{args['message']}' {human}."
+                return f"{kind} created (id={reminder['id']}): '{message}' {human}."
 
             case "reminder_list":
                 reminders = await db.get_reminders(user_id)
@@ -582,6 +746,58 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
                     await sched.unschedule_reminder(rid)
                     return f"Reminder {rid} deleted."
                 return f"Reminder {rid} not found."
+
+            case "reminder_snooze":
+                from datetime import timedelta
+                duration_str = args.get("duration", "").strip()
+                reminder_id = args.get("reminder_id")
+
+                # No duration — ask the user
+                if not duration_str:
+                    return "How long would you like to snooze? (e.g. 10 minutes, 1 hour)"
+
+                minutes = _parse_snooze_duration(duration_str)
+                if not minutes:
+                    return f"I couldn't understand '{duration_str}'. Try something like '10 minutes' or '1 hour'."
+
+                # Resolve which reminder to snooze
+                if not reminder_id:
+                    reminder_id = sched.get_last_fired_reminder_id(user_id)
+                if not reminder_id:
+                    return "I'm not sure which reminder to snooze. Please say 'snooze reminder <id> for <duration>'."
+
+                reminder = await db.get_reminder_by_id(reminder_id, user_id)
+                if not reminder:
+                    return f"Reminder {reminder_id} not found."
+
+                new_fire_at = _now_local() + timedelta(minutes=minutes)
+                new_fire_at_str = new_fire_at.isoformat()
+
+                if reminder.get("recurrence"):
+                    # Recurring: schedule a one-shot extra fire without disturbing the recurrence
+                    scheduler = sched.get_scheduler()
+                    if scheduler:
+                        from apscheduler.triggers.date import DateTrigger
+                        snooze_job_id = f"reminder_{reminder_id}_snooze"
+                        scheduler.add_job(
+                            sched._fire_reminder,
+                            trigger=DateTrigger(run_date=new_fire_at),
+                            id=snooze_job_id,
+                            kwargs={
+                                "reminder_id": reminder_id,
+                                "user_id": user_id,
+                                "message": reminder["message"],
+                                "original_time": new_fire_at_str,
+                                "late": False,
+                            },
+                            replace_existing=True,
+                        )
+                else:
+                    await db.snooze_reminder(reminder_id, new_fire_at_str)
+                    await sched.schedule_reminder({**reminder, "fire_at": new_fire_at_str, "fired": 0})
+
+                human_time = new_fire_at.strftime("%I:%M %p").lstrip("0")
+                return f"Snoozed. I'll remind you about '{reminder['message']}' at {human_time}."
 
             # ── Notes ──
             case "note_create":
@@ -673,6 +889,53 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
                 if off_states:
                     lines.append("OFF: " + ", ".join(f"{s['friendly_name']} ({s['entity_id']})" for s in off_states[:10]))
                 return "\n".join(lines) or "No entities found."
+
+            # ── AnyList ──
+            case "anylist_get_list":
+                if not Config.ANYLIST_EMAIL:
+                    return "AnyList is not configured. Set ANYLIST_EMAIL and ANYLIST_PASSWORD."
+                list_name = args.get("list_name")
+                include_checked = bool(args.get("include_checked", False))
+                if list_name:
+                    items = await anylist_service.get_list_items(list_name, include_checked)
+                    if not items:
+                        label = "items" if include_checked else "unchecked items"
+                        return f"No {label} found in '{list_name}'."
+                    lines = []
+                    for item in items:
+                        label = item["name"]
+                        if item["quantity"]:
+                            label = f"{item['quantity']} {label}"
+                        if item["details"]:
+                            label += f" ({item['details']})"
+                        if item["category"]:
+                            label += f" [{item['category']}]"
+                        lines.append(f"• {label}")
+                    return "\n".join(lines)
+                else:
+                    lists = await anylist_service.get_lists()
+                    if not lists:
+                        return "No AnyList shopping lists found."
+                    return "Available lists: " + ", ".join(l["name"] for l in lists)
+
+            case "anylist_get_meal_plan":
+                if not Config.ANYLIST_EMAIL:
+                    return "AnyList is not configured. Set ANYLIST_EMAIL and ANYLIST_PASSWORD."
+                start = args.get("start") or args.get("date") or _now_local().strftime("%Y-%m-%d")
+                end = args.get("end") or args.get("end_date") or start
+                meals = await anylist_service.get_meal_plan(start, end)
+                if not meals:
+                    date_range = start if start == end else f"{start} to {end}"
+                    return f"No meals planned for {date_range}."
+                lines = []
+                for meal in meals:
+                    line = meal["meal"]
+                    if start != end:
+                        line = f"{meal['date']}: {line}"
+                    if meal.get("notes"):
+                        line += f" — {meal['notes']}"
+                    lines.append(line)
+                return "\n".join(lines)
 
             case "get_calendar_events":
                 if not (Config.CALDAV_URL and Config.CALDAV_USERNAME and Config.CALDAV_PASSWORD):

@@ -16,6 +16,13 @@ logger = logging.getLogger(__name__)
 _bot = None
 _scheduler: AsyncIOScheduler | None = None
 
+# user_id -> reminder_id of the most recently fired reminder (in-memory, lost on restart)
+_last_fired: dict[int, int] = {}
+
+
+def get_last_fired_reminder_id(user_id: int) -> int | None:
+    return _last_fired.get(user_id)
+
 
 def set_bot(bot):
     global _bot
@@ -59,6 +66,7 @@ async def _fire_reminder(reminder_id: int, user_id: int, message: str, original_
 
 
 async def _one_shot_job(reminder_id: int, user_id: int, message: str, original_time: str, late: bool = False, smart: bool = False):
+    _last_fired[user_id] = reminder_id
     if smart:
         await _run_smart_reminder(reminder_id, user_id, message)
     else:
@@ -67,6 +75,7 @@ async def _one_shot_job(reminder_id: int, user_id: int, message: str, original_t
 
 
 async def _recurring_job(reminder_id: int, user_id: int, message: str, fire_at: str, smart: bool = False):
+    _last_fired[user_id] = reminder_id
     if smart:
         await _run_smart_reminder(reminder_id, user_id, message)
     else:

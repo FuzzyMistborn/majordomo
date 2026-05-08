@@ -216,6 +216,25 @@ async def mark_reminder_fired(reminder_id: int, next_fire_at: str | None = None)
         await db.commit()
 
 
+async def get_reminder_by_id(reminder_id: int, user_id: int) -> dict | None:
+    async with aiosqlite.connect(DB) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM reminders WHERE id = ? AND user_id = ?", (reminder_id, user_id)
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def snooze_reminder(reminder_id: int, new_fire_at: str) -> bool:
+    async with aiosqlite.connect(DB) as db:
+        cur = await db.execute(
+            "UPDATE reminders SET fire_at = ?, fired = 0 WHERE id = ?", (new_fire_at, reminder_id)
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
 async def delete_reminder(user_id: int, reminder_id: int) -> bool:
     async with aiosqlite.connect(DB) as db:
         cur = await db.execute(

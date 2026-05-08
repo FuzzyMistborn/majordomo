@@ -37,6 +37,11 @@ class Config:
         if c.strip()
     ]
 
+    # AnyList
+    ANYLIST_EMAIL: str = os.environ.get("ANYLIST_EMAIL", "")
+    ANYLIST_PASSWORD: str = os.environ.get("ANYLIST_PASSWORD", "")
+    ANYLIST_ICAL_URL: str = os.environ.get("ANYLIST_ICAL_URL", "")
+
     # Database
     DB_PATH: str = os.environ.get("DB_PATH", "/data/bot.db")
 
