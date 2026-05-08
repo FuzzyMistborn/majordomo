@@ -77,55 +77,6 @@ async def get_entity_state(entity_id: str) -> dict:
         "attributes": data.get("attributes", {}),
     }
 
-async def _ensure_datetime(dt: str, end_of_day: bool = False) -> str:
-    """Ensure a date string has a time component for the HA calendar API."""
-    if "T" not in dt:
-        suffix = "T23:59:59" if end_of_day else "T00:00:00"
-        return dt + suffix
-    return dt
-
-
-async def get_calendar_events(start: str, end: str) -> list[dict]:
-    """
-    Query all configured calendars for events in the given ISO 8601 date range.
-    Returns merged list of events across all calendars.
-    """
-    if not _enabled():
-        raise RuntimeError("Home Assistant is not configured.")
-    if not Config.HA_CALENDARS:
-        return []
-
-    start = await _ensure_datetime(start, end_of_day=False)
-    end = await _ensure_datetime(end, end_of_day=True)
-
-    all_events = []
-    async with httpx.AsyncClient(timeout=15) as client:
-        for calendar_id in Config.HA_CALENDARS:
-            try:
-                resp = await client.get(
-                    f"{_base()}/api/calendars/{calendar_id}",
-                    headers=_headers(),
-                    params={"start": start, "end": end},
-                )
-                resp.raise_for_status()
-                for event in resp.json():
-                    all_events.append({
-                        "calendar": calendar_id,
-                        "summary": event.get("summary", "(no title)"),
-                        "start": event.get("start", {}).get("dateTime") or event.get("start", {}).get("date", ""),
-                        "end": event.get("end", {}).get("dateTime") or event.get("end", {}).get("date", ""),
-                        "description": event.get("description", ""),
-                        "location": event.get("location", ""),
-                        "all_day": "dateTime" not in event.get("start", {}),
-                    })
-            except Exception as e:
-                all_events.append({"calendar": calendar_id, "error": str(e)})
-
-    # Sort by start time
-    all_events.sort(key=lambda e: e.get("start", ""))
-    return all_events
-
-
 async def get_weather() -> dict:
     """Fetch current weather and today's forecast from the configured weather entity."""
     if not _enabled():

@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import database as db
 import scheduler as sched
 from config import Config
+from services import calendar as cal_service
 from services import homeassistant as ha
 from services import search as search_service
 
@@ -24,6 +25,20 @@ def _normalize_list_name(name: str) -> str:
 
 def _now_local() -> datetime:
     return datetime.now(ZoneInfo(Config.TIMEZONE))
+
+
+def _fix_year(dt_str: str | None) -> str | None:
+    """Replace a hallucinated year with the current year."""
+    if not dt_str or len(dt_str) < 4:
+        return dt_str
+    current_year = _now_local().year
+    try:
+        if int(dt_str[:4]) != current_year:
+            logger.warning(f"Correcting hallucinated year in datetime: {dt_str}")
+            return str(current_year) + dt_str[4:]
+    except ValueError:
+        pass
+    return dt_str
 
 
 def _parse_datetime(dt_str: str) -> datetime:
@@ -145,6 +160,44 @@ TOOL_DEFINITIONS = [
             "name": "reminder_delete",
             "description": "Delete a reminder by ID.",
             "parameters": {"type": "object", "properties": {"reminder_id": {"type": "integer"}}, "required": ["reminder_id"]},
+        },
+    },
+    # ── Memory ──
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_save",
+            "description": "CALL THIS TOOL when the user says 'remember', 'note that', 'save that', or provides a reusable fact (e.g. a calendar name, HA entity, person's name). Do NOT just say you'll remember — call this tool. Overwrites any existing value for the same key.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "Short label for the fact (e.g. \"wife's calendar\", \"office light\")"},
+                    "value": {"type": "string", "description": "The actual value to remember (e.g. \"Family Vacations\", \"light.office_main\")"},
+                },
+                "required": ["key", "value"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_delete",
+            "description": "Forget a previously saved fact by its key.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string"},
+                },
+                "required": ["key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_list",
+            "description": "List all saved facts for this user.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
     # ── Notes ──
@@ -299,9 +352,9 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "ha_get_calendar_events",
+            "name": "get_calendar_events",
             "description": (
-                "Get calendar events from configured Nextcloud calendars for a date range. "
+                "Get calendar events from CalDAV (Nextcloud) for a date range. "
                 "start and end are ISO 8601 dates or datetimes e.g. 2026-05-08 or 2026-05-08T00:00:00."
             ),
             "parameters": {
@@ -317,7 +370,128 @@ TOOL_DEFINITIONS = [
 ]
 
 
+def _normalize_calendar_args(args: dict) -> dict:
+    """Coerce common parameter-name variants to canonical names before dispatching."""
+    from datetime import timedelta as _td
+
+    # --- Step 1: Combine split date + time fields ---
+    import re as _re
+    _FULL_DT = _re.compile(r"^\d{4}-\d{2}-\d{2}")
+    _TIME_ONLY = _re.compile(r"^\d{2}:\d{2}")
+
+    s_date = args.pop("start_date", None)
+    s_time = args.pop("start_time", None)
+    e_date = args.pop("end_date", None)
+    e_time = args.pop("end_time", None)
+
+    # If *_time fields actually hold full datetimes, treat them as such
+    if s_time and _FULL_DT.match(str(s_time)):
+        if not s_date:
+            s_date = str(s_time)[:10]
+        if "new_start" not in args:
+            args["new_start"] = s_time
+        s_time = None
+    if e_time and _FULL_DT.match(str(e_time)):
+        if not e_date:
+            e_date = str(e_time)[:10]
+        if "new_end" not in args:
+            args["new_end"] = e_time
+        e_time = None
+
+    if s_date and s_time:
+        if "start" not in args:
+            args["start"] = s_date
+        if "new_start" not in args:
+            args["new_start"] = f"{s_date}T{s_time}"
+    elif s_date and "start" not in args:
+        args["start"] = s_date
+    elif s_time and _TIME_ONLY.match(str(s_time)):
+        base = (args.get("start") or "")[:10]
+        if len(base) == 10 and "new_start" not in args:
+            args["new_start"] = f"{base}T{s_time}"
+
+    if e_date and e_time:
+        if "new_end" not in args:
+            args["new_end"] = f"{e_date}T{e_time}"
+        if "end" not in args:
+            args["end"] = e_date
+    elif e_date and "end" not in args:
+        args["end"] = e_date
+    elif e_time and _TIME_ONLY.match(str(e_time)):
+        base = (args.get("new_start") or args.get("start") or "")[:10]
+        if len(base) == 10 and "new_end" not in args:
+            args["new_end"] = f"{base}T{e_time}"
+
+    # --- Step 2: Simple renames ---
+    renames = {
+        "startdatetime": "start",
+        "start_datetime": "start",
+        "date": "start",
+        "event_date": "start",
+        "enddatetime": "end",
+        "end_datetime": "end",
+        "title": "summary",
+        "event_title": "summary",
+        "event_name": "summary",
+        "name": "summary",
+        "calendar_id": "calendar_name",
+        "cal_name": "calendar_name",
+        "calendar": "calendar_name",
+    }
+    for old, new in renames.items():
+        if old in args and new not in args:
+            args[new] = args.pop(old)
+
+    # --- Step 3: Resolve relative date words ---
+    _RELATIVE = {
+        "today":     lambda now: now.strftime("%Y-%m-%d"),
+        "tomorrow":  lambda now: (now + _td(days=1)).strftime("%Y-%m-%d"),
+        "yesterday": lambda now: (now - _td(days=1)).strftime("%Y-%m-%d"),
+    }
+    for field in ("start", "end", "new_start", "new_end"):
+        val = args.get(field)
+        if isinstance(val, str) and val.lower() in _RELATIVE:
+            args[field] = _RELATIVE[val.lower()](_now_local())
+            logger.info(f"Resolved relative date '{val}' -> '{args[field]}'")
+
+    if "calendar_name" in args and args["calendar_name"]:
+        args["calendar_name"] = args["calendar_name"].strip()
+
+    return args
+
+
+_TOOL_ALIASES: dict[str, str] = {
+    # calendar read aliases
+    "calendar_get": "get_calendar_events",
+    "get_events": "get_calendar_events",
+    "list_events": "get_calendar_events",
+    "getcalendarevents": "get_calendar_events",
+    "listcalendarevents": "get_calendar_events",
+    # memory aliases
+    "store_memory": "memory_save",
+    "save_memory": "memory_save",
+    "add_memory": "memory_save",
+    "set_memory": "memory_save",
+    "forget_memory": "memory_delete",
+}
+
+
 async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
+    # Resolve method-dispatch pattern: model passes method='delete_event' as an arg
+    if "method" in args:
+        method_val = str(args.pop("method")).lower().replace(" ", "_")
+        resolved = _TOOL_ALIASES.get(method_val, method_val)
+        logger.info(f"Method-dispatch: {name}(method={method_val!r}) -> {resolved}")
+        name = resolved
+
+    # Resolve alias (model hallucinated tool name)
+    if name in _TOOL_ALIASES:
+        name = _TOOL_ALIASES[name]
+
+    # Normalize calendar parameter names regardless of which alias was used
+    if any(x in name for x in ("calendar", "event")):
+        args = _normalize_calendar_args(args)
+
     try:
         match name:
             # ── Todo ──
@@ -361,6 +535,21 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
             case "todo_delete_item":
                 ok = await db.delete_todo_item(args["item_id"])
                 return "Item deleted." if ok else f"Item id={args['item_id']} not found."
+
+            # ── Memory ──
+            case "memory_save":
+                await db.save_memory(user_id, args["key"], args["value"])
+                return f"Remembered: {args['key']} = {args['value']}"
+
+            case "memory_delete":
+                ok = await db.delete_memory(user_id, args["key"])
+                return f"Forgotten." if ok else f"No memory found for '{args['key']}'."
+
+            case "memory_list":
+                memories = await db.get_memories(user_id)
+                if not memories:
+                    return "No saved facts yet."
+                return "\n".join(f"- {m['key']}: {m['value']}" for m in memories)
 
             # ── Reminders ──
             case "reminder_create":
@@ -485,29 +674,31 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
                     lines.append("OFF: " + ", ".join(f"{s['friendly_name']} ({s['entity_id']})" for s in off_states[:10]))
                 return "\n".join(lines) or "No entities found."
 
-            case "ha_get_calendar_events":
-                if not (Config.HA_URL and Config.HA_TOKEN):
-                    return "Home Assistant is not configured."
-                if not Config.HA_CALENDARS:
-                    return "No calendars configured. Set HA_CALENDARS in your environment."
-                events = await ha.get_calendar_events(args["start"], args["end"])
+            case "get_calendar_events":
+                if not (Config.CALDAV_URL and Config.CALDAV_USERNAME and Config.CALDAV_PASSWORD):
+                    return "CalDAV is not configured. Set CALDAV_URL, CALDAV_USERNAME, and CALDAV_PASSWORD."
+                if "start" not in args:
+                    args["start"] = _now_local().strftime("%Y-%m-%d")
+                if "end" not in args:
+                    args["end"] = args["start"]
+                events = await cal_service.get_calendar_events(args["start"], args["end"])
                 if not events:
                     return "No events found in that date range."
                 lines = []
                 for e in events:
                     if "error" in e:
-                        lines.append(f"\u26a0\ufe0f {e['calendar']}: {e['error']}")
+                        lines.append(f"⚠️ {e['calendar']}: {e['error']}")
                         continue
                     start = e["start"]
                     if e["all_day"]:
                         time_str = "All day"
                     elif "T" in start:
-                        # Extract just HH:MM
-                        time_str = start.split("T")[1][:5]
+                        dt = datetime.fromisoformat(start)
+                        time_str = dt.strftime("%I:%M %p").lstrip("0")
                     else:
                         time_str = start
                     loc = f" ({e['location']})" if e.get("location") else ""
-                    desc = f"\n  _{e['description']}_" if e.get("description") else ""
+                    desc = f"\n  {e['description']}" if e.get("description") else ""
                     lines.append(f"• {time_str} — {e['summary']}{loc}{desc}")
                 return "\n".join(lines)
 

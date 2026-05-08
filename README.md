@@ -92,10 +92,7 @@ The bot uses HA's REST API with a long-lived access token.
 light,switch,input_boolean,script,automation,climate,cover,fan,media_player
 ```
 
-**Calendar integration** requires setting `HA_CALENDARS` to a comma-separated list of calendar entity IDs from your HA instance (e.g. calendar entities from Nextcloud, Google Calendar, etc.):
-```
-HA_CALENDARS=calendar.personal,calendar.family
-```
+**Weather integration** requires setting `HA_WEATHER_ENTITY` to the entity ID of a weather entity in HA (e.g. `weather.home`).
 
 ---
 
@@ -111,8 +108,11 @@ HA_CALENDARS=calendar.personal,calendar.family
 | `HA_URL` | — | _(disabled)_ | Home Assistant base URL |
 | `HA_TOKEN` | — | _(disabled)_ | HA long-lived access token |
 | `HA_ALLOWED_DOMAINS` | — | `light,switch,...` | HA domains the bot may control |
-| `HA_CALENDARS` | — | _(disabled)_ | Comma-separated HA calendar entity IDs |
 | `HA_WEATHER_ENTITY` | — | _(disabled)_ | HA weather entity ID (e.g. `weather.home`) |
+| `CALDAV_URL` | — | _(disabled)_ | CalDAV server URL (e.g. `https://nextcloud.example.com/remote.php/dav`) |
+| `CALDAV_USERNAME` | — | _(disabled)_ | CalDAV username |
+| `CALDAV_PASSWORD` | — | _(disabled)_ | CalDAV password or app token |
+| `CALDAV_CALENDARS` | — | _(all)_ | Comma-separated calendar display names to sync |
 | `TIMEZONE` | — | `UTC` | IANA timezone for reminders (e.g. `America/New_York`) |
 | `HISTORY_WINDOW` | — | `20` | Conversation messages to retain per user |
 | `DB_PATH` | — | `/data/bot.db` | SQLite database path inside the container |
@@ -155,5 +155,6 @@ The bot's voice is defined in `personality.md`. By default it responds as Wit (H
 - Test the HA token: `curl -H "Authorization: Bearer TOKEN" http://HA_URL/api/`
 
 **Calendar returns nothing**
-- Set `HA_CALENDARS` to the exact calendar entity IDs from your HA instance
-- Confirm `HA_URL` and `HA_TOKEN` are set correctly
+- Check `CALDAV_URL`, `CALDAV_USERNAME`, and `CALDAV_PASSWORD` are set correctly
+- Use an app password from Nextcloud Settings → Security → App passwords (not your login password)
+- If `CALDAV_CALENDARS` is set, ensure the names exactly match the display names in Nextcloud

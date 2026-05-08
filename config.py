@@ -19,12 +19,6 @@ class Config:
     # Home Assistant
     HA_URL: str = os.environ.get("HA_URL", "")
     HA_TOKEN: str = os.environ.get("HA_TOKEN", "")
-    HA_CALENDARS: list[str] = [
-        c.strip()
-        for c in os.environ.get("HA_CALENDARS", "").split(",")
-        if c.strip()
-    ]
-
     HA_ALLOWED_DOMAINS: list[str] = [
         d.strip()
         for d in os.environ.get("HA_ALLOWED_DOMAINS", "light,switch,input_boolean,script,automation,climate,cover,fan,media_player").split(",")
@@ -32,6 +26,16 @@ class Config:
     ]
 
     HA_WEATHER_ENTITY: str = os.environ.get("HA_WEATHER_ENTITY", "")
+
+    # CalDAV
+    CALDAV_URL: str = os.environ.get("CALDAV_URL", "")
+    CALDAV_USERNAME: str = os.environ.get("CALDAV_USERNAME", "")
+    CALDAV_PASSWORD: str = os.environ.get("CALDAV_PASSWORD", "")
+    CALDAV_CALENDARS: list[str] = [
+        c.strip()
+        for c in os.environ.get("CALDAV_CALENDARS", "").split(",")
+        if c.strip()
+    ]
 
     # Database
     DB_PATH: str = os.environ.get("DB_PATH", "/data/bot.db")

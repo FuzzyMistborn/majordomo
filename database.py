@@ -42,6 +42,15 @@ CREATE TABLE IF NOT EXISTS notes (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, key)
+);
 """
 
 async def init_db():
@@ -279,6 +288,38 @@ async def delete_note(note_id: int, user_id: int) -> bool:
     async with aiosqlite.connect(DB) as db:
         cur = await db.execute(
             "DELETE FROM notes WHERE id = ? AND user_id = ?", (note_id, user_id)
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+# ── Memories ─────────────────────────────────────────────────────────────────
+
+async def save_memory(user_id: int, key: str, value: str) -> None:
+    async with aiosqlite.connect(DB) as db:
+        await db.execute(
+            """INSERT INTO memories (user_id, key, value)
+               VALUES (?, ?, ?)
+               ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value, created_at = CURRENT_TIMESTAMP""",
+            (user_id, key, value),
+        )
+        await db.commit()
+
+
+async def get_memories(user_id: int) -> list[dict]:
+    async with aiosqlite.connect(DB) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM memories WHERE user_id = ? ORDER BY key", (user_id,)
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+
+async def delete_memory(user_id: int, key: str) -> bool:
+    async with aiosqlite.connect(DB) as db:
+        cur = await db.execute(
+            "DELETE FROM memories WHERE user_id = ? AND LOWER(key) = LOWER(?)", (user_id, key)
         )
         await db.commit()
         return cur.rowcount > 0
