@@ -1,0 +1,514 @@
+"""
+Tool definitions and handlers for the Ollama AI agent.
+"""
+
+import json
+import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import database as db
+import scheduler as sched
+from config import Config
+from services import homeassistant as ha
+from services import search as search_service
+
+logger = logging.getLogger(__name__)
+
+
+def _normalize_list_name(name: str) -> str:
+    """Strip trailing 'list'/'lists' that models often append."""
+    import re
+    return re.sub(r"\s+lists?$", "", name, flags=re.IGNORECASE).strip()
+
+
+def _now_local() -> datetime:
+    return datetime.now(ZoneInfo(Config.TIMEZONE))
+
+
+def _parse_datetime(dt_str: str) -> datetime:
+    dt = datetime.fromisoformat(dt_str)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo(Config.TIMEZONE))
+    return dt
+
+
+TOOL_DEFINITIONS = [
+    # ── Todo ──
+    {
+        "type": "function",
+        "function": {
+            "name": "todo_create_list",
+            "description": "Create a new named to-do list.",
+            "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "todo_delete_list",
+            "description": "Delete a to-do list and all its items.",
+            "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "todo_get_lists",
+            "description": "Get all to-do lists.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "todo_add_item",
+            "description": "Add an item to a named to-do list.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "list_name": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["list_name", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "todo_get_items",
+            "description": "Get all items in a named to-do list.",
+            "parameters": {"type": "object", "properties": {"list_name": {"type": "string"}}, "required": ["list_name"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "todo_update_item",
+            "description": "Update a to-do item's text or mark it done/undone.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "item_id": {"type": "integer"},
+                    "content": {"type": "string"},
+                    "done": {"type": "boolean"},
+                },
+                "required": ["item_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "todo_delete_item",
+            "description": "Delete a specific to-do item by ID.",
+            "parameters": {"type": "object", "properties": {"item_id": {"type": "integer"}}, "required": ["item_id"]},
+        },
+    },
+    # ── Reminders ──
+    {
+        "type": "function",
+        "function": {
+            "name": "reminder_create",
+            "description": (
+                "Create a reminder. fire_at is ISO 8601. "
+                "For recurring, also provide recurrence as JSON cron spec "
+                "(e.g. {\"minute\":\"0\",\"hour\":\"9\",\"day_of_week\":\"mon\"}) "
+                "and recurrence_human as a readable description. "
+                "Set smart=true to make the reminder dynamically fetch calendar events and reminders at fire time instead of sending a static message."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "description": "The reminder text, or an instruction for smart reminders e.g. \'Give me a summary of today\'s calendar events and any reminders I have\'"},
+                    "fire_at": {"type": "string"},
+                    "recurrence": {"type": "string"},
+                    "recurrence_human": {"type": "string"},
+                    "smart": {"type": "boolean", "description": "If true, the message is an AI instruction run at fire time rather than a static reminder text"},
+                },
+                "required": ["message", "fire_at"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reminder_list",
+            "description": "List all active reminders.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reminder_delete",
+            "description": "Delete a reminder by ID.",
+            "parameters": {"type": "object", "properties": {"reminder_id": {"type": "integer"}}, "required": ["reminder_id"]},
+        },
+    },
+    # ── Notes ──
+    {
+        "type": "function",
+        "function": {
+            "name": "note_create",
+            "description": "Create a note with title, content, and optional tags.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "content": {"type": "string"},
+                    "tags": {"type": "string", "description": "Comma-separated tags"},
+                },
+                "required": ["title", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "note_search",
+            "description": "Search notes by keyword.",
+            "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "note_update",
+            "description": "Update an existing note by ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {"type": "integer"},
+                    "title": {"type": "string"},
+                    "content": {"type": "string"},
+                    "tags": {"type": "string"},
+                },
+                "required": ["note_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "note_delete",
+            "description": "Delete a note by ID.",
+            "parameters": {"type": "object", "properties": {"note_id": {"type": "integer"}}, "required": ["note_id"]},
+        },
+    },
+    # ── Web Search ──
+    {
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "description": "Search the web. Returns a short summary and top links.",
+            "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+        },
+    },
+    # ── Home Assistant ──
+    {
+        "type": "function",
+        "function": {
+            "name": "ha_turn_on",
+            "description": "Turn on a Home Assistant entity. Provide the exact entity_id (e.g. light.office, switch.kitchen).",
+            "parameters": {
+                "type": "object",
+                "properties": {"entity_id": {"type": "string", "description": "Exact entity_id"}},
+                "required": ["entity_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ha_turn_off",
+            "description": "Turn off a Home Assistant entity. Provide the exact entity_id.",
+            "parameters": {
+                "type": "object",
+                "properties": {"entity_id": {"type": "string", "description": "Exact entity_id"}},
+                "required": ["entity_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ha_toggle",
+            "description": "Toggle a Home Assistant entity on/off.",
+            "parameters": {
+                "type": "object",
+                "properties": {"entity_id": {"type": "string"}},
+                "required": ["entity_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ha_call_service",
+            "description": "Call any Home Assistant service (e.g. set brightness, temperature). domain+service+entity_id required.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "domain": {"type": "string", "description": "e.g. light, climate, switch"},
+                    "service": {"type": "string", "description": "e.g. turn_on, set_temperature"},
+                    "entity_id": {"type": "string"},
+                    "brightness": {"type": "integer", "description": "0-255 for lights"},
+                    "temperature": {"type": "number", "description": "For climate entities"},
+                },
+                "required": ["domain", "service", "entity_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ha_get_state",
+            "description": "Get the current state of a single Home Assistant entity by exact entity_id.",
+            "parameters": {
+                "type": "object",
+                "properties": {"entity_id": {"type": "string"}},
+                "required": ["entity_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ha_get_states",
+            "description": "Get states of all entities in given domains (e.g. light, switch). Shows which are on/off.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "domains": {"type": "array", "items": {"type": "string"}, "description": "e.g. [\"light\"]"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ha_get_calendar_events",
+            "description": (
+                "Get calendar events from configured Nextcloud calendars for a date range. "
+                "start and end are ISO 8601 dates or datetimes e.g. 2026-05-08 or 2026-05-08T00:00:00."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start": {"type": "string", "description": "Start of range (ISO 8601)"},
+                    "end": {"type": "string", "description": "End of range (ISO 8601)"},
+                },
+                "required": ["start", "end"],
+            },
+        },
+    },
+]
+
+
+async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
+    try:
+        match name:
+            # ── Todo ──
+            case "todo_create_list":
+                result = await db.create_todo_list(user_id, args["name"])
+                return f"Created list '{result['name']}' (id={result['id']})."
+
+            case "todo_delete_list":
+                name = _normalize_list_name(args["name"])
+                ok = await db.delete_todo_list(user_id, name)
+                return f"Deleted list '{name}'." if ok else f"No list named '{name}' found."
+
+            case "todo_get_lists":
+                lists = await db.get_todo_lists(user_id)
+                if not lists:
+                    return "No to-do lists found."
+                return json.dumps(lists)
+
+            case "todo_add_item":
+                list_name = _normalize_list_name(args["list_name"])
+                result = await db.add_todo_item(user_id, list_name, args["content"])
+                return f"Added item (id={result['id']}) to '{list_name}'."
+
+            case "todo_get_items":
+                list_name = _normalize_list_name(args["list_name"])
+                items = await db.get_todo_items(user_id, list_name)
+                if not items:
+                    return f"List '{args['list_name']}' is empty."
+                lines = []
+                for i, item in enumerate(items, 1):
+                    status = "✅ Done" if item["done"] else "☐ Pending"
+                    lines.append(f"{i}. {item['content']} ({status})")
+                return "\n".join(lines)
+
+            case "todo_update_item":
+                ok = await db.update_todo_item(
+                    args["item_id"], content=args.get("content"), done=args.get("done")
+                )
+                return "Item updated." if ok else f"Item id={args['item_id']} not found."
+
+            case "todo_delete_item":
+                ok = await db.delete_todo_item(args["item_id"])
+                return "Item deleted." if ok else f"Item id={args['item_id']} not found."
+
+            # ── Reminders ──
+            case "reminder_create":
+                fire_at_str = args["fire_at"]
+                _parse_datetime(fire_at_str)
+                smart = bool(args.get("smart", False))
+                reminder = await db.create_reminder(
+                    user_id=user_id,
+                    message=args["message"],
+                    fire_at=fire_at_str,
+                    recurrence=args.get("recurrence"),
+                    recurrence_human=args.get("recurrence_human"),
+                    smart=smart,
+                )
+                await sched.schedule_reminder(reminder)
+                human = reminder.get("recurrence_human") or f"at {fire_at_str}"
+                kind = "Smart reminder" if smart else "Reminder"
+                return f"{kind} created (id={reminder['id']}): '{args['message']}' {human}."
+
+            case "reminder_list":
+                reminders = await db.get_reminders(user_id)
+                if not reminders:
+                    return "No active reminders."
+                return json.dumps(reminders)
+
+            case "reminder_delete":
+                rid = args["reminder_id"]
+                ok = await db.delete_reminder(user_id, rid)
+                if ok:
+                    await sched.unschedule_reminder(rid)
+                    return f"Reminder {rid} deleted."
+                return f"Reminder {rid} not found."
+
+            # ── Notes ──
+            case "note_create":
+                note = await db.create_note(user_id, args["title"], args["content"], args.get("tags", ""))
+                return f"Note created (id={note['id']}): '{note['title']}'."
+
+            case "note_search":
+                notes = await db.search_notes(user_id, args["query"])
+                if not notes:
+                    return "No notes found matching that query."
+                summaries = [{"id": n["id"], "title": n["title"], "tags": n["tags"], "updated_at": n["updated_at"]} for n in notes]
+                return json.dumps(summaries)
+
+            case "note_update":
+                ok = await db.update_note(
+                    args["note_id"], user_id,
+                    title=args.get("title"), content=args.get("content"), tags=args.get("tags"),
+                )
+                return "Note updated." if ok else f"Note id={args['note_id']} not found."
+
+            case "note_delete":
+                ok = await db.delete_note(args["note_id"], user_id)
+                return "Note deleted." if ok else f"Note id={args['note_id']} not found."
+
+            # ── Web Search ──
+            case "search_web":
+                query = args.get("query", "")
+                if not query:
+                    return "Error: search_web requires a 'query' argument."
+                data = await search_service.search(query)
+                results = data["results"]
+                if not results:
+                    return "No search results found."
+                return json.dumps(results[:5])
+
+            # ── Home Assistant ──
+            case "ha_turn_on":
+                if not (Config.HA_URL and Config.HA_TOKEN):
+                    return "Home Assistant is not configured."
+                entity_id = args["entity_id"]
+                domain = entity_id.split(".")[0]
+                await ha.call_service(domain, "turn_on", entity_id)
+                return f"Turned on {entity_id}."
+
+            case "ha_turn_off":
+                if not (Config.HA_URL and Config.HA_TOKEN):
+                    return "Home Assistant is not configured."
+                entity_id = args["entity_id"]
+                domain = entity_id.split(".")[0]
+                await ha.call_service(domain, "turn_off", entity_id)
+                return f"Turned off {entity_id}."
+
+            case "ha_toggle":
+                if not (Config.HA_URL and Config.HA_TOKEN):
+                    return "Home Assistant is not configured."
+                entity_id = args["entity_id"]
+                await ha.call_service("homeassistant", "toggle", entity_id)
+                return f"Toggled {entity_id}."
+
+            case "ha_call_service":
+                if not (Config.HA_URL and Config.HA_TOKEN):
+                    return "Home Assistant is not configured."
+                entity_id = args.get("entity_id", "")
+                domain = args.get("domain") or (entity_id.split(".")[0] if "." in entity_id else "")
+                service = args.get("service", "")
+                if not domain or not service:
+                    return "Error: ha_call_service requires domain, service, and entity_id."
+                extra = {k: v for k, v in args.items() if k not in ("domain", "service", "entity_id")}
+                await ha.call_service(domain, service, entity_id, extra or None)
+                return f"Called {domain}.{service} on {entity_id}."
+
+            case "ha_get_state":
+                if not (Config.HA_URL and Config.HA_TOKEN):
+                    return "Home Assistant is not configured."
+                state = await ha.get_entity_state(args["entity_id"])
+                return f"{state['friendly_name']} ({state['entity_id']}): {state['state']}"
+
+            case "ha_get_states":
+                if not (Config.HA_URL and Config.HA_TOKEN):
+                    return "Home Assistant is not configured."
+                states = await ha.get_states(domains=args.get("domains"))
+                if not states:
+                    return "No entities found."
+                on_states = [s for s in states if s["state"] == "on"]
+                off_states = [s for s in states if s["state"] == "off"]
+                lines = []
+                if on_states:
+                    lines.append("ON: " + ", ".join(f"{s['friendly_name']} ({s['entity_id']})" for s in on_states))
+                if off_states:
+                    lines.append("OFF: " + ", ".join(f"{s['friendly_name']} ({s['entity_id']})" for s in off_states[:10]))
+                return "\n".join(lines) or "No entities found."
+
+            case "ha_get_calendar_events":
+                if not (Config.HA_URL and Config.HA_TOKEN):
+                    return "Home Assistant is not configured."
+                if not Config.HA_CALENDARS:
+                    return "No calendars configured. Set HA_CALENDARS in your environment."
+                events = await ha.get_calendar_events(args["start"], args["end"])
+                if not events:
+                    return "No events found in that date range."
+                lines = []
+                for e in events:
+                    if "error" in e:
+                        lines.append(f"\u26a0\ufe0f {e['calendar']}: {e['error']}")
+                        continue
+                    start = e["start"]
+                    if e["all_day"]:
+                        time_str = "All day"
+                    elif "T" in start:
+                        # Extract just HH:MM
+                        time_str = start.split("T")[1][:5]
+                    else:
+                        time_str = start
+                    loc = f" ({e['location']})" if e.get("location") else ""
+                    desc = f"\n  _{e['description']}_" if e.get("description") else ""
+                    lines.append(f"• {time_str} — {e['summary']}{loc}{desc}")
+                return "\n".join(lines)
+
+            case _:
+                return f"Unknown tool: {name}"
+
+    except PermissionError as e:
+        return f"Permission denied: {e}"
+    except ValueError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        logger.error(f"Tool '{name}' failed: {e}", exc_info=True)
+        return f"Tool error: {e}"

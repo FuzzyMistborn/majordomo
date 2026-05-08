@@ -1,0 +1,33 @@
+services:
+  telegram-bot:
+    build: .
+    container_name: ollama-telegram-bot
+    restart: unless-stopped
+    volumes:
+      - bot_data:/data
+    environment:
+      # ── Required ──────────────────────────────────────────────────────────
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - ALLOWED_USER_IDS=${ALLOWED_USER_IDS}          # comma-separated Telegram user IDs
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
+      # ── Ollama ────────────────────────────────────────────────────────────
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-gemma3:4b}
+
+      # ── Home Assistant (optional) ─────────────────────────────────────────
+      - HA_URL=${HA_URL:-}
+      - HA_TOKEN=${HA_TOKEN:-}
+      - HA_ALLOWED_DOMAINS=${HA_ALLOWED_DOMAINS:-light,switch,input_boolean,script,automation,climate,cover,fan,media_player}
+      - HA_CALENDARS=${HA_CALENDARS:-}
+
+      # ── Bot settings ──────────────────────────────────────────────────────
+      - TIMEZONE=${TIMEZONE:-UTC}
+      - HISTORY_WINDOW=${HISTORY_WINDOW:-20}
+      - DB_PATH=/data/bot.db
+
+    # Needed so host.docker.internal resolves to the host (for Ollama)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  bot_data:
