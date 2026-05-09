@@ -8,7 +8,7 @@ The bot has a personality: it responds as **Wit** (Hoid), an ancient, sardonic f
 
 ## Features
 
-- **To-do lists** — multiple named lists; add, update, check off, delete items
+- **To-do lists** — multiple named lists; add items, delete items by name, mark items done, delete lists
 - **Reminders** — one-shot and recurring, persisted across restarts
 - **Smart reminders** — recurring reminders that run an AI prompt at fire time (e.g. a daily morning briefing that fetches your calendar and active reminders)
 - **Notes** — create with tags, search by keyword, update, delete
@@ -64,13 +64,18 @@ Just send natural language messages. Examples:
 |---|---|
 | `"Remind me to take meds at 8am every day"` | Creates a recurring daily reminder |
 | `"Every morning at 7am give me a summary of my day"` | Creates a smart recurring reminder that fetches calendar + reminders at fire time |
-| `"Add eggs to my shopping list"` | Adds to the 'shopping' list (creates it if needed) |
-| `"What's on my calendar this week?"` | Fetches events from your HA calendars |
+| `"What reminders do I have?"` | Lists active reminders with IDs |
+| `"Snooze that for 10 minutes"` | Snoozes the most recently fired reminder |
+| `"Create a list called Jobs"` | Creates a new internal to-do list |
+| `"Add update resume to the Jobs list"` | Adds item to the Jobs list |
+| `"Delete update resume from the Jobs list"` | Deletes that item by name (fuzzy matched) |
+| `"I finished update resume on the Jobs list"` | Marks the item done |
+| `"What's on my grocery list?"` | Reads from AnyList (if configured), falls back to internal todo |
+| `"What's for dinner this week?"` | Fetches meal plan from AnyList |
+| `"What's on my calendar this week?"` | Fetches events from CalDAV |
 | `"Create a note called Server Setup with the steps I just sent"` | Creates a tagged note |
 | `"Search for the latest Fedora Kinoite release"` | Searches Tavily, returns summary + links |
 | `"Turn off the living room lights"` | Calls HA service |
-| `"What reminders do I have?"` | Lists active reminders |
-| `"Mark the eggs item as done"` | Checks off the item |
 
 ### Commands
 
@@ -103,11 +108,15 @@ The bot reads shopping lists and meal plans directly from AnyList using the [pya
 
 Set `ANYLIST_EMAIL` and `ANYLIST_PASSWORD` in your `.env`. The bot logs in once on first use and reuses the session.
 
+**AnyList is read-only from the bot** — the bot can read and display your lists and meal plan, but adding or removing items must be done in the AnyList app. Add/delete/complete item commands always target the internal to-do lists.
+
 **Shopping lists** — unchecked items are returned by default:
 > "What's on my grocery list?"
 > "Show me everything on the shopping list including checked items"
 
-**Meal plan** — fetched via AnyList's iCalendar feed:
+List names are fuzzy-matched, so "grocery" will find a list named "Groceries".
+
+**Meal plan** — fetched via AnyList's iCalendar feed. If your account's iCal URL is stable, you can set it directly with `ANYLIST_ICAL_URL` to skip the login step:
 > "What's for dinner tonight?"
 > "What meals are planned this week?"
 
@@ -128,6 +137,7 @@ Set `ANYLIST_EMAIL` and `ANYLIST_PASSWORD` in your `.env`. The bot logs in once 
 | `HA_WEATHER_ENTITY` | — | _(disabled)_ | HA weather entity ID (e.g. `weather.home`) |
 | `ANYLIST_EMAIL` | — | _(disabled)_ | AnyList account email |
 | `ANYLIST_PASSWORD` | — | _(disabled)_ | AnyList account password |
+| `ANYLIST_ICAL_URL` | — | _(auto)_ | AnyList iCal feed URL (optional; fetched automatically if omitted) |
 | `CALDAV_URL` | — | _(disabled)_ | CalDAV server URL (e.g. `https://nextcloud.example.com/remote.php/dav`) |
 | `CALDAV_USERNAME` | — | _(disabled)_ | CalDAV username |
 | `CALDAV_PASSWORD` | — | _(disabled)_ | CalDAV password or app token |
