@@ -58,7 +58,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "I can help with:\n"
         "• 📋 To-do lists _(I won't judge the contents. Much.)_\n"
         "• ⏰ Reminders _(one-off and recurring, like certain mistakes)_\n"
-        "• 📝 Notes\n"
         "• 🔍 Web search\n"
         "• 🏠 Home Assistant control\n"
         "• 📅 Calendar events\n\n"
@@ -118,16 +117,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not reply or not reply.strip():
         reply = "I processed your request but had nothing to say. Please try again."
 
-    # Strip markdown the model adds since it renders inconsistently
-    import re
-    reply = re.sub(r"[*]{2}(.+?)[*]{2}", r"\1", reply)
-    reply = re.sub(r"[*](.+?)[*]", r"\1", reply)
-    reply = re.sub(r"_(.+?)_", r"\1", reply)
-    reply = re.sub(r"`(.+?)`", r"\1", reply)
+    # Render as HTML: escape special chars, convert **bold** to <b>bold</b>,
+    # strip remaining model-added markdown artifacts.
+    import re, html as _html
+    reply = _html.escape(reply)
+    reply = re.sub(r"\*\*([^*]+?)\*\*", r"<b>\1</b>", reply)
+    reply = re.sub(r"\*([^*]+?)\*", r"\1", reply)
+    reply = re.sub(r"_([^_]+?)_", r"\1", reply)
+    reply = re.sub(r"`([^`]+?)`", r"\1", reply)
 
     # Telegram messages have a 4096 char limit
     for i in range(0, max(len(reply), 1), 4096):
-        await update.message.reply_text(reply[i:i + 4096])
+        await update.message.reply_text(reply[i:i + 4096], parse_mode="HTML")
 
 
 

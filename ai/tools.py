@@ -124,25 +124,17 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "todo_update_item",
-            "description": "Update a to-do item's text or mark it done/undone.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "item_id": {"type": "integer"},
-                    "content": {"type": "string"},
-                    "done": {"type": "boolean"},
-                },
-                "required": ["item_id"],
-            },
+            "name": "todo_delete_item",
+            "description": "Delete a specific to-do item by ID.",
+            "parameters": {"type": "object", "properties": {"item_id": {"type": "integer"}}, "required": ["item_id"]},
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "todo_delete_item",
-            "description": "Delete a specific to-do item by ID.",
-            "parameters": {"type": "object", "properties": {"item_id": {"type": "integer"}}, "required": ["item_id"]},
+            "name": "todo_clear_list",
+            "description": "Remove all items from a named to-do list (keeps the list itself).",
+            "parameters": {"type": "object", "properties": {"list_name": {"type": "string"}}, "required": ["list_name"]},
         },
     },
     # ── Reminders ──
@@ -242,56 +234,6 @@ TOOL_DEFINITIONS = [
             "name": "memory_list",
             "description": "List all saved facts for this user.",
             "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    # ── Notes ──
-    {
-        "type": "function",
-        "function": {
-            "name": "note_create",
-            "description": "Create a note with title, content, and optional tags.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string"},
-                    "content": {"type": "string"},
-                    "tags": {"type": "string", "description": "Comma-separated tags"},
-                },
-                "required": ["title", "content"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "note_search",
-            "description": "Search notes by keyword.",
-            "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "note_update",
-            "description": "Update an existing note by ID.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "note_id": {"type": "integer"},
-                    "title": {"type": "string"},
-                    "content": {"type": "string"},
-                    "tags": {"type": "string"},
-                },
-                "required": ["note_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "note_delete",
-            "description": "Delete a note by ID.",
-            "parameters": {"type": "object", "properties": {"note_id": {"type": "integer"}}, "required": ["note_id"]},
         },
     },
     # ── Weather ──
@@ -771,12 +713,12 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
             # ── Todo ──
             case "todo_create_list":
                 result = await db.create_todo_list(user_id, args["name"])
-                return f"Created list '{result['name']}' (id={result['id']})."
+                return f"Created **{result['name'].title()}**."
 
             case "todo_delete_list":
                 name = _normalize_list_name(args["name"])
                 ok = await db.delete_todo_list(user_id, name)
-                return f"Deleted list '{name}'." if ok else f"No list named '{name}' found."
+                return f"Deleted list **{name.title()}**." if ok else f"No list named **{name.title()}** found."
 
             case "todo_get_lists":
                 lists = await db.get_todo_lists(user_id)
@@ -787,28 +729,26 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
             case "todo_add_item":
                 list_name = _normalize_list_name(args["list_name"])
                 result = await db.add_todo_item(user_id, list_name, args["content"])
-                return f"Added item (id={result['id']}) to '{list_name}'."
+                return f"Added {args['content']} to **{list_name.title()}**."
 
             case "todo_get_items":
                 list_name = _normalize_list_name(args["list_name"])
                 items = await db.get_todo_items(user_id, list_name)
                 if not items:
-                    return f"List '{args['list_name']}' is empty."
-                lines = []
+                    return f"**{list_name.title()}** is empty."
+                lines = [f"**{list_name.title()}:**"]
                 for i, item in enumerate(items, 1):
-                    status = "✅ Done" if item["done"] else "☐ Pending"
-                    lines.append(f"{i}. {item['content']} ({status})")
+                    lines.append(f"{i}. {item['content']}")
                 return "\n".join(lines)
-
-            case "todo_update_item":
-                ok = await db.update_todo_item(
-                    args["item_id"], content=args.get("content"), done=args.get("done")
-                )
-                return "Item updated." if ok else f"Item id={args['item_id']} not found."
 
             case "todo_delete_item":
                 ok = await db.delete_todo_item(args["item_id"])
                 return "Item deleted." if ok else f"Item id={args['item_id']} not found."
+
+            case "todo_clear_list":
+                list_name = _normalize_list_name(args["list_name"])
+                count = await db.clear_todo_list(user_id, list_name)
+                return f"Cleared **{list_name.title()}** ({count} item{'s' if count != 1 else ''} removed)."
 
             # ── Memory ──
             case "memory_save":
@@ -817,7 +757,7 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
 
             case "memory_delete":
                 ok = await db.delete_memory(user_id, args["key"])
-                return f"Forgotten." if ok else f"No memory found for '{args['key']}'."
+                return "Forgotten." if ok else f"No memory found for {args['key']}."
 
             case "memory_list":
                 memories = await db.get_memories(user_id)
@@ -861,7 +801,7 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
                             date_str = " on " + fire_dt.strftime("%A, %B %-d")
                         human = f"at {time_str}{date_str}"
                 kind = "Smart reminder" if smart else "Reminder"
-                return f"{kind} created (id={reminder['id']}): '{message}' {human}."
+                return f"{kind} set: **{message}** {human}."
 
             case "reminder_list":
                 reminders = await db.get_reminders(user_id)
@@ -939,30 +879,7 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
                     await sched.schedule_reminder({**reminder, "fire_at": new_fire_at_str, "fired": 0})
 
                 human_time = new_fire_at.strftime("%I:%M %p").lstrip("0")
-                return f"Snoozed. I'll remind you about '{reminder['message']}' at {human_time}."
-
-            # ── Notes ──
-            case "note_create":
-                note = await db.create_note(user_id, args["title"], args["content"], args.get("tags", ""))
-                return f"Note created (id={note['id']}): '{note['title']}'."
-
-            case "note_search":
-                notes = await db.search_notes(user_id, args["query"])
-                if not notes:
-                    return "No notes found matching that query."
-                summaries = [{"id": n["id"], "title": n["title"], "tags": n["tags"], "updated_at": n["updated_at"]} for n in notes]
-                return json.dumps(summaries)
-
-            case "note_update":
-                ok = await db.update_note(
-                    args["note_id"], user_id,
-                    title=args.get("title"), content=args.get("content"), tags=args.get("tags"),
-                )
-                return "Note updated." if ok else f"Note id={args['note_id']} not found."
-
-            case "note_delete":
-                ok = await db.delete_note(args["note_id"], user_id)
-                return "Note deleted." if ok else f"Note id={args['note_id']} not found."
+                return f"Snoozed. I'll remind you about **{reminder['message']}** at {human_time}."
 
             # ── Web Search ──
             case "search_web":
@@ -1042,8 +959,8 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
                     items = await anylist_service.get_list_items(list_name, include_checked)
                     if not items:
                         label = "items" if include_checked else "unchecked items"
-                        return f"No {label} found in '{list_name}'."
-                    lines = []
+                        return f"No {label} in **{list_name.title()}**."
+                    lines = [f"**On your {list_name.title()} list:**"]
                     for item in items:
                         label = item["name"]
                         if item["quantity"]:
@@ -1095,23 +1012,35 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
                 events = await cal_service.get_calendar_events(args["start"], args["end"])
                 if not events:
                     return "No events found in that date range."
-                lines = []
+                from collections import defaultdict as _defaultdict
+                from datetime import date as _date
+                by_date: dict = _defaultdict(list)
+                errors = []
                 for e in events:
                     if "error" in e:
-                        lines.append(f"⚠️ {e['calendar']}: {e['error']}")
+                        errors.append(f"⚠️ {e['calendar']}: {e['error']}")
                         continue
-                    start = e["start"]
-                    if e["all_day"]:
-                        time_str = "All day"
-                    elif "T" in start:
-                        dt = datetime.fromisoformat(start)
-                        time_str = dt.strftime("%I:%M %p").lstrip("0")
-                    else:
-                        time_str = start
-                    loc = f" ({e['location']})" if e.get("location") else ""
-                    desc = f"\n  {e['description']}" if e.get("description") else ""
-                    lines.append(f"• {time_str} — {e['summary']}{loc}{desc}")
-                return "\n".join(lines)
+                    by_date[e["start"][:10]].append(e)
+                lines = list(errors)
+                for date_str in sorted(by_date):
+                    try:
+                        day_label = _date.fromisoformat(date_str).strftime("%A, %B %-d")
+                    except ValueError:
+                        day_label = date_str
+                    lines.append(f"\n**{day_label}**")
+                    for e in by_date[date_str]:
+                        start = e["start"]
+                        if e["all_day"]:
+                            time_str = "All day"
+                        elif "T" in start:
+                            dt = datetime.fromisoformat(start)
+                            time_str = dt.strftime("%I:%M %p").lstrip("0")
+                        else:
+                            time_str = start
+                        loc = f" ({e['location']})" if e.get("location") else ""
+                        desc = f"\n    {e['description']}" if e.get("description") else ""
+                        lines.append(f"  • {time_str} — {e['summary']}{loc}{desc}")
+                return "\n".join(lines).strip()
 
             case "ha_get_weather":
                 if not (Config.HA_URL and Config.HA_TOKEN):

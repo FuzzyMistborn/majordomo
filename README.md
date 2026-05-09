@@ -1,6 +1,6 @@
 # Majordomo
 
-A self-hosted Telegram bot powered by Ollama. Manages to-do lists, reminders, notes, web search, and Home Assistant control — all via natural language. Runs entirely on your own infrastructure; nothing leaves your network except Telegram API calls and Tavily search queries.
+A self-hosted Telegram bot powered by Ollama. Manages to-do lists, reminders, web search, and Home Assistant control — all via natural language. Runs entirely on your own infrastructure; nothing leaves your network except Telegram API calls and Tavily search queries.
 
 The bot has a personality: it responds as **Wit** (Hoid), an ancient, sardonic figure who finds the work beneath him but does it anyway, with style.
 
@@ -8,13 +8,15 @@ The bot has a personality: it responds as **Wit** (Hoid), an ancient, sardonic f
 
 ## Features
 
-- **To-do lists** — multiple named lists; add items, delete items by name, mark items done, delete lists
+- **To-do lists** — multiple named lists; add items, delete by name, clear all items, delete lists
+- **URL capture** — send a bare URL (or multiple, one per line) and it's automatically added to a configured list; set the rule once with natural language
 - **Reminders** — one-shot and recurring, persisted across restarts
 - **Smart reminders** — recurring reminders that run an AI prompt at fire time (e.g. a daily morning briefing that fetches your calendar and active reminders)
-- **Notes** — create with tags, search by keyword, update, delete
+- **Memory** — save reusable facts (entity IDs, calendar names, preferences) that persist across conversations
 - **Web search** — via Tavily, summarised by the AI with top links
-- **Home Assistant** — query entity states, turn on/off/toggle devices, call any service, read calendar events, fetch weather
+- **Home Assistant** — query entity states, turn on/off/toggle devices, call any service, fetch weather
 - **AnyList** — read shopping list items and query the meal plan for any date range
+- **CalDAV** — read calendar events grouped by day, with date ranges resolved from natural language
 - **User whitelist** — only allowed Telegram user IDs can interact
 
 ---
@@ -69,13 +71,15 @@ Just send natural language messages. Examples:
 | `"Create a list called Jobs"` | Creates a new internal to-do list |
 | `"Add update resume to the Jobs list"` | Adds item to the Jobs list |
 | `"Delete update resume from the Jobs list"` | Deletes that item by name (fuzzy matched) |
-| `"I finished update resume on the Jobs list"` | Marks the item done |
+| `"Remove all items from the Jobs list"` | Clears the list, keeping it intact |
+| `"Whenever I send you a link, add it to my Links list"` | Saves a URL auto-capture rule to memory |
+| `https://example.com` | Auto-added to the configured list (one or more URLs, one per line) |
 | `"What's on my grocery list?"` | Reads from AnyList (if configured), falls back to internal todo |
 | `"What's for dinner this week?"` | Fetches meal plan from AnyList |
-| `"What's on my calendar this week?"` | Fetches events from CalDAV |
-| `"Create a note called Server Setup with the steps I just sent"` | Creates a tagged note |
+| `"What's on my calendar this week?"` | Fetches events from CalDAV, grouped by day |
 | `"Search for the latest Fedora Kinoite release"` | Searches Tavily, returns summary + links |
 | `"Turn off the living room lights"` | Calls HA service |
+| `"Remember that the office light is light.office_main"` | Saves a fact to persistent memory |
 
 ### Commands
 
@@ -108,7 +112,7 @@ The bot reads shopping lists and meal plans directly from AnyList using the [pya
 
 Set `ANYLIST_EMAIL` and `ANYLIST_PASSWORD` in your `.env`. The bot logs in once on first use and reuses the session.
 
-**AnyList is read-only from the bot** — the bot can read and display your lists and meal plan, but adding or removing items must be done in the AnyList app. Add/delete/complete item commands always target the internal to-do lists.
+**AnyList is read-only from the bot** — the bot can read and display your lists and meal plan, but adding or removing items must be done in the AnyList app. Add/delete commands always target the internal to-do lists.
 
 **Shopping lists** — unchecked items are returned by default:
 > "What's on my grocery list?"
@@ -119,6 +123,18 @@ List names are fuzzy-matched, so "grocery" will find a list named "Groceries".
 **Meal plan** — fetched via AnyList's iCalendar feed. If your account's iCal URL is stable, you can set it directly with `ANYLIST_ICAL_URL` to skip the login step:
 > "What's for dinner tonight?"
 > "What meals are planned this week?"
+
+---
+
+## Memory
+
+The bot can save reusable facts that persist across conversations and container restarts:
+
+> "Remember that my wife's calendar is Family"
+> "The office light entity ID is light.office_main"
+> "Whenever I send you a link, add it to my Interesting Links list"
+
+Saved facts are injected into every prompt so the bot applies them automatically. Use `"forget <key>"` to remove a fact.
 
 ---
 

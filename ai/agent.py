@@ -102,7 +102,7 @@ DATE REFERENCE — use these exact values when constructing ISO datetimes:
 NEVER use any other year. NEVER guess a date — always derive from the reference above.
 NEVER search the web for the current date or time — it is already provided above.
 
-You have tools for: to-do lists, reminders, notes, web search, Home Assistant control, calendar management, and AnyList (shopping lists and meal plans).
+You have tools for: to-do lists, reminders, web search, Home Assistant control, calendar management, and AnyList (shopping lists and meal plans).
 
 Operational rules:
 - Be concise (Telegram chat). Do NOT use Markdown formatting (no **bold**, no *italic*, no `code`). Plain text only.
@@ -127,6 +127,7 @@ AnyList rules:
 
 Memory rules:
 - When the user says "remember", "note that", or tells you a reusable fact (e.g. "my wife's calendar is Family", "the office light is light.office_main"), you MUST call the memory_save tool immediately. Do NOT just say you'll remember — call the tool.
+- If the user says "whenever I send a URL/link add it to X list", call memory_save with key="url_auto_list" and value=the list name. To disable, call memory_delete with key="url_auto_list".
 - ALWAYS consult the KNOWN FACTS section at the top of this prompt before answering personal questions. Never say you don't know something that appears there.
 - When you apply a memory, do so silently. Don't announce it.
 """
@@ -758,6 +759,21 @@ async def chat(user_id: int, user_message: str) -> str:
     memories = await db.get_memories(user_id)
     all_tools = get_active_tool_definitions()
 
+    # URL auto-add: if every non-empty line is a URL and url_auto_list is set in memory, add all.
+    _URL_LINE_RE = re.compile(r'^\s*https?://\S+\s*$', re.IGNORECASE)
+    _msg_lines = [l for l in user_message.splitlines() if l.strip()]
+    if _msg_lines and all(_URL_LINE_RE.match(l) for l in _msg_lines):
+        _mem_lookup_url = {m["key"].lower(): m["value"] for m in memories}
+        _auto_list = _mem_lookup_url.get("url_auto_list")
+        if _auto_list:
+            _urls = [l.strip() for l in _msg_lines]
+            logger.info(f"URL auto-add intercept: list={_auto_list!r} count={len(_urls)}")
+            for _url in _urls:
+                await handle_tool_call("todo_add_item", {"list_name": _auto_list, "content": _url}, user_id)
+            reply = f"Added {len(_urls)} link{'s' if len(_urls) != 1 else ''} to **{_auto_list.title()}**."
+            _history[user_id].append({"role": "assistant", "content": reply})
+            return reply
+
     # Python-level intercept: answer simple "what is my X" questions directly from memory
     # so the model can't hallucinate/expand saved values.
     if memories:
@@ -778,6 +794,22 @@ async def chat(user_id: int, user_message: str) -> str:
 
     # Pre-model intercepts: bypass the model entirely for queries we can always handle
     # deterministically. This prevents hallucination and prompt-injection contamination.
+
+    # URL auto-add rule: "whenever I send a URL/link, add it to X list"
+    _URL_RULE_RE = re.compile(
+        r"\b(?:whenever|when|any\s+time|if)\b.{0,40}?\b(?:send|paste|share)\b.{0,20}?"
+        r"\b(?:just\s+)?(?:a\s+)?(?:link|url)\b.{0,60}?\badd\s+it\s+to\b.{0,30}?"
+        r"\b(?:(?:the|my)\s+)?[\"']?([A-Za-z][\w\s]{1,30}?)[\"']?\s*list\b",
+        re.IGNORECASE,
+    )
+    _url_rule_match = _URL_RULE_RE.search(user_message)
+    if _url_rule_match:
+        _target_list = _url_rule_match.group(1).strip().strip("\"'“”‘’")
+        await db.save_memory(user_id, "url_auto_list", _target_list)
+        logger.info(f"URL auto-add rule saved: list={_target_list!r}")
+        reply = f"Got it. Any URL you send me on its own will automatically be added to the '{_target_list}' list."
+        _history[user_id].append({"role": "assistant", "content": reply})
+        return reply
 
     # Reminder list
     _LIST_REMINDER_WORDS = ("what reminders", "list reminders", "show reminders",
@@ -845,6 +877,19 @@ async def chat(user_id: int, user_message: str) -> str:
             _history[user_id].append({"role": "assistant", "content": reply})
             return reply
 
+    # Calendar
+    if Config.CALDAV_URL and Config.CALDAV_USERNAME and Config.CALDAV_PASSWORD:
+        _CAL_WORDS = ("calendar", "schedule", "events", "appointments", "agenda")
+        if any(w in user_message.lower() for w in _CAL_WORDS):
+            today_str = datetime.now(ZoneInfo(Config.TIMEZONE)).strftime("%Y-%m-%d")
+            start_str = grounded_dates[0] if grounded_dates else today_str
+            end_str = grounded_dates[-1] if grounded_dates else today_str
+            logger.info(f"Pre-model calendar intercept: {start_str} to {end_str}")
+            cal_result = await handle_tool_call("get_calendar_events", {"start": start_str, "end": end_str}, user_id)
+            reply = "**\U0001f4c5 Calendar events:**\n\n" + cal_result
+            _history[user_id].append({"role": "assistant", "content": reply})
+            return reply
+
     # Weather
     if Config.HA_WEATHER_ENTITY:
         _WEATHER_WORDS = ("weather", "temperature", "forecast", "outside", "rain", "sunny", "cold", "hot", "humid")
@@ -875,6 +920,28 @@ async def chat(user_id: int, user_message: str) -> str:
         _history[user_id].append({"role": "assistant", "content": result})
         return result
 
+    # To-do: clear all items — must come before single-item delete so "remove both/all items"
+    # isn't mistaken for an item named "both items".
+    _CLEAR_LIST_QUANT_RE = re.compile(
+        r"\b(?:remove|delete|erase|clear|wipe)\s+"
+        r"(?:all|both|everything)(?:\s+(?:of\s+(?:them|it)|(?:the\s+)?items?|of\s+the\s+items?))?"
+        r"\s+(?:from|on|in)\s+(?:(?:the|my)\s+)?[\"']?"
+        r"([A-Za-z][\w\s]{1,30}?)[\"']?\s*(?:list\b)?\s*\??$",
+        re.IGNORECASE,
+    )
+    _CLEAR_LIST_VERB_RE = re.compile(
+        r"\bclear\s+(?:(?:the|my)\s+)?[\"']?"
+        r"([A-Za-z][\w\s]{1,30}?)[\"']?\s+list\b\s*\??$",
+        re.IGNORECASE,
+    )
+    _clr_match = _CLEAR_LIST_QUANT_RE.search(user_message) or _CLEAR_LIST_VERB_RE.search(user_message)
+    if _clr_match:
+        _lname = _sq(_clr_match.group(1)).strip()
+        logger.info(f"Pre-model todo clear list intercept: list={_lname!r}")
+        result = await handle_tool_call("todo_clear_list", {"list_name": _lname}, user_id)
+        _history[user_id].append({"role": "assistant", "content": result})
+        return result
+
     # To-do: delete item from list — "delete/remove X from Y", "remove X from Y list"
     # Must come before the delete-list intercept to avoid "remove X from Y list" being
     # misread as a list named "X from Y".
@@ -893,9 +960,9 @@ async def chat(user_id: int, user_message: str) -> str:
         _item_id, _matched = await _find_todo_item_by_name(user_id, _list_q, _item_q)
         if _item_id is not None:
             await handle_tool_call("todo_delete_item", {"item_id": _item_id}, user_id)
-            reply = f"Deleted '{_matched}' from the '{_list_q}' list."
+            reply = f"Deleted {_matched} from **{_list_q.title()}**."
         else:
-            reply = f"I couldn't find '{_item_q}' on the '{_list_q}' list."
+            reply = f"Couldn't find {_item_q} on **{_list_q.title()}**."
         _history[user_id].append({"role": "assistant", "content": reply})
         return reply
 
@@ -941,35 +1008,6 @@ async def chat(user_id: int, user_message: str) -> str:
         _history[user_id].append({"role": "assistant", "content": result})
         return result
 
-    # To-do: mark item done — "i finished X on/in the Y list", "mark X as done in Y"
-    # Requires "list" at end of first pattern to prevent false positives.
-    _DONE_ITEM_RE1 = re.compile(
-        r"\b(?:i\s+(?:have\s+)?)?(?:finished|completed)\s+"
-        r"[\"\']?(.+?)[\"\']?"
-        r"\s+(?:on|in)\s+(?:(?:the|my)\s+)?[\"\']?"
-        r"([A-Za-z][\w\s]{1,30}?)[\"\']?\s+list\b",
-        re.IGNORECASE,
-    )
-    _DONE_ITEM_RE2 = re.compile(
-        r"\bmark\s+[\"\']?(.+?)[\"\']?"
-        r"\s+as\s+(?:done|complete(?:d)?|finished)\s+(?:on|in|from)\s+(?:(?:the|my)\s+)?[\"\']?"
-        r"([A-Za-z][\w\s]{1,30}?)[\"\']?\s*(?:list\b)?\s*\??$",
-        re.IGNORECASE,
-    )
-    _done_match = _DONE_ITEM_RE1.search(user_message) or _DONE_ITEM_RE2.search(user_message)
-    if _done_match:
-        _item_q = _sq(_done_match.group(1))
-        _list_q = _sq(_done_match.group(2)).strip()
-        logger.info(f"Pre-model todo complete item intercept: item={_item_q!r} list={_list_q!r}")
-        _item_id, _matched = await _find_todo_item_by_name(user_id, _list_q, _item_q)
-        if _item_id is not None:
-            await handle_tool_call("todo_update_item", {"item_id": _item_id, "done": True}, user_id)
-            reply = f"Marked '{_matched}' as done on the '{_list_q}' list."
-        else:
-            reply = f"I couldn't find '{_item_q}' on the '{_list_q}' list."
-        _history[user_id].append({"role": "assistant", "content": reply})
-        return reply
-
     # List read: try AnyList first (if configured), fall back to internal todo
     _STORE_RE_PRE = re.compile(
         r"(?:what\s+do\s+i\s+need(?:\s+to\s+(?:get|buy|pick\s+up))?|"
@@ -979,10 +1017,16 @@ async def chat(user_id: int, user_message: str) -> str:
         re.IGNORECASE,
     )
     _LIST_RE_PRE = re.compile(
-        r"what(?:'s|\s+(?:else\s+)?is)\s+(?:(?:on|in)\s+)?(?:my\s+)?([A-Za-z][\w\s]{1,25}?)\s+list",
+        r"what(?:'s|\s+(?:else\s+)?(?:is|are))\s+(?:(?:on|in)\s+)?(?:my\s+)?([A-Za-z][\w\s]{1,25}?)\s+list",
         re.IGNORECASE,
     )
-    _sm_pre = _STORE_RE_PRE.search(user_message) or _LIST_RE_PRE.search(user_message)
+    # "show me / give me / tell me [the items on] the X list"
+    _LIST_SHOW_RE = re.compile(
+        r"\b(?:show(?:\s+me)?|give\s+me|tell\s+me|get|fetch)\b.{0,50}?"
+        r"(?:the\s+|my\s+)([A-Za-z][\w\s]{1,25}?)\s+list\s*\??$",
+        re.IGNORECASE,
+    )
+    _sm_pre = _STORE_RE_PRE.search(user_message) or _LIST_RE_PRE.search(user_message) or _LIST_SHOW_RE.search(user_message)
     if _sm_pre:
         _list_name = _sm_pre.group(1).strip().rstrip("?").strip()
         _list_name = re.sub(r"^the\s+", "", _list_name, flags=re.IGNORECASE).strip()
@@ -1261,8 +1305,7 @@ async def chat(user_id: int, user_message: str) -> str:
                 return result
 
             if _resolved_name == "get_calendar_events" and len(tool_calls) == 1:
-                header = "\U0001f4c5 Calendar events:\n\n"
-                reply = header + result
+                reply = "**\U0001f4c5 Calendar events:**\n\n" + result
                 _history[user_id].append({"role": "assistant", "content": reply})
                 return reply
 

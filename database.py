@@ -165,6 +165,17 @@ async def delete_todo_item(item_id: int) -> bool:
         return cur.rowcount > 0
 
 
+async def clear_todo_list(user_id: int, list_name: str) -> int:
+    """Delete all items from a list, keeping the list itself. Returns count removed."""
+    list_id = await get_list_id(user_id, list_name)
+    if list_id is None:
+        raise ValueError(f"No list named '{list_name}' found.")
+    async with aiosqlite.connect(DB) as db:
+        cur = await db.execute("DELETE FROM todo_items WHERE list_id = ?", (list_id,))
+        await db.commit()
+        return cur.rowcount
+
+
 # ── Reminders ───────────────────────────────────────────────────────────────
 
 async def create_reminder(user_id: int, message: str, fire_at: str, recurrence: str | None, recurrence_human: str | None, smart: bool = False) -> dict:
