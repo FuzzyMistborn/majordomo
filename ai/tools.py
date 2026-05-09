@@ -444,6 +444,33 @@ TOOL_DEFINITIONS = [
     },
 ]
 
+_HA_TOOL_NAMES = frozenset({"ha_turn_on", "ha_turn_off", "ha_toggle", "ha_call_service", "ha_get_state", "ha_get_states"})
+_WEATHER_TOOL_NAMES = frozenset({"ha_get_weather"})
+_CALDAV_TOOL_NAMES = frozenset({"get_calendar_events"})
+_ANYLIST_TOOL_NAMES = frozenset({"anylist_get_list", "anylist_get_meal_plan"})
+
+
+def get_active_tool_definitions() -> list[dict]:
+    """Return only tool definitions for services that are configured."""
+    ha_enabled = bool(Config.HA_URL and Config.HA_TOKEN)
+    weather_enabled = ha_enabled and bool(Config.HA_WEATHER_ENTITY)
+    caldav_enabled = bool(Config.CALDAV_URL and Config.CALDAV_USERNAME and Config.CALDAV_PASSWORD)
+    anylist_enabled = bool(Config.ANYLIST_EMAIL and Config.ANYLIST_PASSWORD)
+
+    active = []
+    for td in TOOL_DEFINITIONS:
+        name = td["function"]["name"]
+        if name in _HA_TOOL_NAMES and not ha_enabled:
+            continue
+        if name in _WEATHER_TOOL_NAMES and not weather_enabled:
+            continue
+        if name in _CALDAV_TOOL_NAMES and not caldav_enabled:
+            continue
+        if name in _ANYLIST_TOOL_NAMES and not anylist_enabled:
+            continue
+        active.append(td)
+    return active
+
 
 def _normalize_calendar_args(args: dict) -> dict:
     """Coerce common parameter-name variants to canonical names before dispatching."""
@@ -555,13 +582,50 @@ _TOOL_ALIASES: dict[str, str] = {
     "get_meals": "anylist_get_meal_plan",
     "get_dinner": "anylist_get_meal_plan",
     "whats_for_dinner": "anylist_get_meal_plan",
+    # HA control aliases
+    "ha_turnoff": "ha_turn_off",
+    "haturnoff": "ha_turn_off",
+    "haturnofflight": "ha_turn_off",
+    "turnofflight": "ha_turn_off",
+    "ha_turnon": "ha_turn_on",
+    "haturnonlight": "ha_turn_on",
+    "turnonlight": "ha_turn_on",
+    "hatogglelight": "ha_toggle",
+    "ha_toggle_light": "ha_toggle",
+    # HA weather aliases — model invents many names for this
+    "ha_weather_api": "ha_get_weather",
+    "ha_weather": "ha_get_weather",
+    "weather_api": "ha_get_weather",
+    "get_weather": "ha_get_weather",
+    "weather": "ha_get_weather",
+    "current_weather": "ha_get_weather",
+    "fetch_weather": "ha_get_weather",
+    # todo aliases
+    "add_task": "todo_add_item",
+    "add_todo": "todo_add_item",
+    "add_item": "todo_add_item",
+    "add_to_list": "todo_add_item",
+    "create_list": "todo_create_list",
+    "make_list": "todo_create_list",
+    "new_list": "todo_create_list",
+    "delete_list": "todo_delete_list",
+    "remove_list": "todo_delete_list",
+    "get_list_items": "todo_get_items",
+    "list_items": "todo_get_items",
     # reminder aliases
     "create_reminder": "reminder_create",
     "add_reminder": "reminder_create",
     "set_reminder": "reminder_create",
     "snooze_reminder": "reminder_snooze",
     "snooze": "reminder_snooze",
+    # web search aliases
+    "search": "search_web",
+    "google_search": "search_web",
+    "web_search": "search_web",
+    "internet_search": "search_web",
+    "tavily_search": "search_web",
     # memory aliases
+    "memory": "memory_save",
     "store_memory": "memory_save",
     "save_memory": "memory_save",
     "add_memory": "memory_save",
@@ -612,10 +676,47 @@ def _normalize_reminder_args(args: dict) -> dict:
     return args
 
 
+_HA_ENTITY_PARAM_ALIASES = ("lightid", "light_id", "entity", "device", "device_id", "id", "light")
+_HA_TOOLS = frozenset({"ha_turn_on", "ha_turn_off", "ha_toggle", "ha_call_service", "ha_get_state", "ha_get_states"})
+
+
+async def _normalize_ha_args(name: str, args: dict, user_id: int) -> dict:
+    """Normalise HA parameter names and resolve placeholder entity_ids from memory."""
+    # Coerce alternative param names → entity_id
+    if "entity_id" not in args:
+        for alt in _HA_ENTITY_PARAM_ALIASES:
+            if alt in args:
+                args["entity_id"] = args.pop(alt)
+                break
+
+    entity_id = args.get("entity_id", "")
+    # A real HA entity_id always contains a dot (e.g. light.office).
+    # If the model passed a descriptive placeholder, look it up from memory.
+    if entity_id and "." not in entity_id:
+        memories = await db.get_memories(user_id)
+        entity_mems = [(m["key"], m["value"]) for m in memories if "." in m["value"]]
+        placeholder = entity_id.lower()
+        best, best_score = None, 0
+        for key, value in entity_mems:
+            key_words = set(re.sub(r"entity[_\s]?id", "", key, flags=re.IGNORECASE).split()) - {"the", "for", "of"}
+            score = sum(1 for w in key_words if w and w in placeholder)
+            if score > best_score:
+                best_score, best = score, value
+        if best:
+            logger.info(f"Resolved placeholder entity_id {entity_id!r} → {best!r} from memory")
+            args["entity_id"] = best
+
+    return args
+
+
 async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
-    # Strip namespace prefix (e.g. "reminder_api.create_reminder" -> "create_reminder")
+    # Strip namespace prefix — supports both dot and colon separators
+    # e.g. "reminder_api.create_reminder" -> "create_reminder"
+    # e.g. "google:search" -> "search"
     if "." in name:
         name = name.rsplit(".", 1)[-1]
+    if ":" in name:
+        name = name.rsplit(":", 1)[-1]
 
     # Resolve method-dispatch pattern: model passes method='delete_event' as an arg
     if "method" in args:
@@ -624,9 +725,34 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
         logger.info(f"Method-dispatch: {name}(method={method_val!r}) -> {resolved}")
         name = resolved
 
+    # Meta-dispatcher: model called "any_tool_name" or similar with the real tool name in args
+    for _meta_key in ("any_tool_name", "tool_name", "function_name", "function", "dispatch"):
+        if _meta_key in args:
+            _actual = str(args.pop(_meta_key)).lower().replace(" ", "_")
+            _actual = _TOOL_ALIASES.get(_actual, _actual)
+            logger.info(f"Meta-dispatch: {name}({_meta_key}={_actual!r}) -> {_actual}")
+            name = _actual
+            break
+
     # Resolve alias (model hallucinated tool name)
     if name in _TOOL_ALIASES:
         name = _TOOL_ALIASES[name]
+
+    # Normalize todo_delete_list / todo_create_list arg name variants
+    if name in ("todo_delete_list", "todo_create_list"):
+        if "list_name" in args and "name" not in args:
+            args["name"] = args.pop("list_name")
+
+    # Normalize todo_add_item arg name variants
+    if name == "todo_add_item":
+        if "task" in args and "content" not in args:
+            args["content"] = args.pop("task")
+        if "item" in args and "content" not in args:
+            args["content"] = args.pop("item")
+        if "list" in args and "list_name" not in args:
+            args["list_name"] = args.pop("list")
+        if "name" in args and "list_name" not in args:
+            args["list_name"] = args.pop("name")
 
     # Normalize calendar parameter names regardless of which alias was used
     if any(x in name for x in ("calendar", "event")):
@@ -635,6 +761,10 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
     # Normalize reminder args (flexible fire_at, year fix)
     if name == "reminder_create":
         args = _normalize_reminder_args(args)
+
+    # Normalize HA args: fix param aliases and resolve placeholder entity_ids
+    if name in _HA_TOOLS:
+        args = await _normalize_ha_args(name, args, user_id)
 
     try:
         match name:
@@ -737,7 +867,19 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
                 reminders = await db.get_reminders(user_id)
                 if not reminders:
                     return "No active reminders."
-                return json.dumps(reminders)
+                lines = []
+                for r in reminders:
+                    try:
+                        fire_dt = _parse_datetime(r["fire_at"])
+                        time_str = fire_dt.strftime("%I:%M %p").lstrip("0")
+                        date_str = fire_dt.strftime("%a, %b %-d")
+                        when = f"{date_str} at {time_str}"
+                    except Exception:
+                        when = r["fire_at"]
+                    recur = f" ({r['recurrence_human']})" if r.get("recurrence_human") else ""
+                    kind = " [smart]" if r.get("smart") else ""
+                    lines.append(f"• {r['message']}{kind} — {when}{recur} [#{r['id']}]")
+                return "\n".join(lines)
 
             case "reminder_delete":
                 rid = args["reminder_id"]
@@ -927,11 +1069,17 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
                 if not meals:
                     date_range = start if start == end else f"{start} to {end}"
                     return f"No meals planned for {date_range}."
+                from datetime import date as _date
                 lines = []
                 for meal in meals:
                     line = meal["meal"]
                     if start != end:
-                        line = f"{meal['date']}: {line}"
+                        try:
+                            d = _date.fromisoformat(meal["date"])
+                            label = d.strftime("%A, %b %-d")
+                        except ValueError:
+                            label = meal["date"]
+                        line = f"{label}: {line}"
                     if meal.get("notes"):
                         line += f" — {meal['notes']}"
                     lines.append(line)

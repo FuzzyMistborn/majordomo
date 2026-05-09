@@ -14,7 +14,8 @@ from zoneinfo import ZoneInfo
 import ollama
 
 import database as db
-from ai.tools import TOOL_DEFINITIONS, _TOOL_ALIASES, handle_tool_call
+import scheduler as sched
+from ai.tools import TOOL_DEFINITIONS, _TOOL_ALIASES, get_active_tool_definitions, handle_tool_call
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,41 @@ def _load_personality() -> str:
     logger.warning("personality.md not found — running without personality file")
     _personality = ""
     return _personality
+
+
+async def _personality_quip(result: str, context: str = "this") -> str:
+    """Make a constrained LLM call for a single in-character sentence reacting to result."""
+    personality = _load_personality()
+    if not personality:
+        return ""
+    try:
+        client = ollama.AsyncClient(host=Config.OLLAMA_HOST)
+        resp = await client.chat(
+            model=Config.OLLAMA_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        personality + "\n\n"
+                        "Respond with exactly one brief in-character sentence. "
+                        "Plain text only, no markdown. Do not repeat the action or data verbatim."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"React briefly to {context}:\n{result}",
+                },
+            ],
+            tools=[],
+        )
+        if isinstance(resp, dict):
+            quip = resp.get("message", {}).get("content", "").strip()
+        else:
+            quip = (resp.message.content or "").strip()
+        return _strip_thinking(quip)
+    except Exception:
+        return ""
+
 
 # Per-user conversation history: user_id -> list of message dicts
 _history: dict[int, list[dict]] = defaultdict(list)
@@ -169,6 +205,47 @@ def _parse_reminder_request(text: str, now: datetime) -> tuple[str | None, datet
     return msg, None
 
 
+_HA_ACTION_RE = re.compile(
+    r'\b(turn\s+on|turn\s+off|toggle|switch\s+on|switch\s+off)\s+(?:the\s+)?(.+?)(?:\s*[,.]|$)',
+    re.IGNORECASE,
+)
+_HA_ACTION_TOOL = {
+    "turnon": "ha_turn_on", "switchon": "ha_turn_on",
+    "turnoff": "ha_turn_off", "switchoff": "ha_turn_off",
+    "toggle": "ha_toggle",
+}
+
+
+def _parse_ha_request(text: str, memories: list[dict]) -> tuple[str | None, str | None]:
+    """Parse 'turn on/off/toggle the X' and return (tool_name, entity_id) or (None, None)."""
+    m = _HA_ACTION_RE.search(text)
+    if not m:
+        return None, None
+    action_key = re.sub(r"\s+", "", m.group(1).lower())
+    tool_name = _HA_ACTION_TOOL.get(action_key)
+    if not tool_name:
+        return None, None
+    thing = m.group(2).strip().lower()
+    # Search memories for an entity_id for this thing
+    mem_lookup = {mem["key"].lower(): mem["value"] for mem in memories}
+    entity_id = None
+    for key_suffix in (f"{thing} entity_id", thing):
+        if key_suffix in mem_lookup and "." in mem_lookup[key_suffix]:
+            entity_id = mem_lookup[key_suffix]
+            break
+    if not entity_id:
+        thing_words = {w for w in thing.split() if w not in {"the", "a", "an"}}
+        for key, value in mem_lookup.items():
+            if "." not in value:
+                continue
+            key_words = {w for w in re.sub(r"entity[_\s]?id", "", key, flags=re.IGNORECASE).split()
+                         if w not in {"the", "for", "of", ""}}
+            if thing_words and key_words and (thing_words <= key_words or key_words <= thing_words):
+                entity_id = value
+                break
+    return tool_name, entity_id
+
+
 def _inject_date_context(message: str) -> str:
     """Replace relative date keywords with ISO dates so the model never has to compute them."""
     lower = message.lower()
@@ -193,6 +270,21 @@ def _inject_date_context(message: str) -> str:
             flags=re.IGNORECASE,
         )
 
+    # Annotate "this week" and "next week" with Sunday-Saturday date ranges (US convention)
+    days_since_sunday = (now.weekday() + 1) % 7  # Mon=0 → 1 day since Sun, Sun=6 → 0
+    this_week_sun = (now - timedelta(days=days_since_sunday)).replace(hour=0, minute=0, second=0, microsecond=0)
+    week_phrases = {
+        "this week": (this_week_sun, this_week_sun + timedelta(days=6)),
+        "next week": (this_week_sun + timedelta(days=7), this_week_sun + timedelta(days=13)),
+    }
+    for phrase, (wstart, wend) in week_phrases.items():
+        result = re.sub(
+            r"\b" + re.escape(phrase) + r"\b",
+            f"{phrase} ({wstart.strftime('%Y-%m-%d')} to {wend.strftime('%Y-%m-%d')})",
+            result,
+            flags=re.IGNORECASE,
+        )
+
     # Annotate weekday names the same way
     day_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
     weekday_dates = {}
@@ -212,21 +304,21 @@ def _inject_date_context(message: str) -> str:
 
 
 _ISO_DATE_PART_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+_US_DATE_RE = re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b")
 _DATE_FIELDS = {"start", "end", "new_start", "new_end", "fire_at",
                 "start_date", "end_date", "new_start_date", "new_end_date",
                 "start_time", "end_time", "date"}  # catches full-datetime values passed in *_time fields
 
 
 def _extract_date_parts(text: str) -> list[str]:
-    """Return unique YYYY-MM-DD values found in text, in order."""
+    """Return unique YYYY-MM-DD values found in text, sorted chronologically."""
     seen: set[str] = set()
-    result = []
     for m in _ISO_DATE_PART_RE.finditer(text):
-        d = m.group(1)
-        if d not in seen:
-            seen.add(d)
-            result.append(d)
-    return result
+        seen.add(m.group(1))
+    for m in _US_DATE_RE.finditer(text):
+        iso = f"{m.group(3)}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+        seen.add(iso)
+    return sorted(seen)
 
 
 def _closest_date(target: str, candidates: list[str]) -> str:
@@ -293,18 +385,38 @@ _MEMORY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Matches: "turn off/on the THING, the entity_id ... is ENTITY" or "THING entity_id is ENTITY"
+_ENTITY_ID_RE = re.compile(
+    r'(?:turn\s+(?:on|off)|toggle)\s+(?:the\s+)?(?P<thing>[\w\s]+?)\s*[,.].*?'
+    r'entity[_\s]id\s+(?:for\s+\S+\s+)?is\s+["\']?(?P<entity>[\w]+\.[\w]+)["\']?'
+    r'|(?:the\s+)?entity[_\s]id\s+for\s+(?:the\s+)?["\']?(?P<thing2>[\w\s]+?)["\']?\s+is\s+["\']?(?P<entity2>[\w]+\.[\w]+)["\']?',
+    re.IGNORECASE,
+)
+
 
 async def _maybe_save_memory(user_id: int, user_message: str) -> str | None:
-    """Fallback: parse a 'remember that X is Y' message and save directly."""
+    """Fallback: parse fact-stating messages and save to memory."""
+    # Pattern: "remember/note that X is Y"
     m = _MEMORY_RE.search(user_message)
-    if not m:
-        return None
-    key = m.group(1).strip().strip('"\'')
-    value = m.group(2).strip().strip('"\'')
-    if key and value:
-        await db.save_memory(user_id, key, value)
-        logger.info(f"Fallback memory save: {key!r} = {value!r}")
-        return f"{key} = {value}"
+    if m:
+        key = m.group(1).strip().strip('"\'')
+        value = m.group(2).strip().strip('"\'')
+        if key and value:
+            await db.save_memory(user_id, key, value)
+            logger.info(f"Fallback memory save: {key!r} = {value!r}")
+            return f"{key} = {value}"
+
+    # Pattern: entity_id facts — "turn off the office light, the entity_id is light.office"
+    m = _ENTITY_ID_RE.search(user_message)
+    if m:
+        thing = (m.group("thing") or m.group("thing2") or "").strip()
+        entity = (m.group("entity") or m.group("entity2") or "").strip()
+        if thing and entity:
+            key = f"{thing} entity_id"
+            await db.save_memory(user_id, key, entity)
+            logger.info(f"Fallback entity_id save: {key!r} = {entity!r}")
+            return f"{key} = {entity}"
+
     return None
 
 
@@ -409,6 +521,95 @@ def _parse_text_tool_calls(content: str) -> list[dict]:
         if name in _KNOWN_TOOLS:
             results.append({"name": name, "arguments": {}, "id": name})
 
+    if results:
+        return results
+
+    # Pattern 5: known tool name on its own line followed by a JSON block
+    # e.g. "memory\n[{"name": "...", "value": "..."}]"
+    for m in re.finditer(r'^\s*(\w+)\s*\n\s*([{\[])', content, re.MULTILINE):
+        name = m.group(1).lower()
+        resolved = _TOOL_ALIASES.get(name, name)
+        if resolved not in {td["function"]["name"] for td in TOOL_DEFINITIONS}:
+            continue
+        try:
+            fragment = content[m.start(2):].strip()
+            data = json.loads(fragment)
+            items = data if isinstance(data, list) else [data]
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                args = (item.get("parameters") or item.get("arguments") or item.get("args") or {})
+                if not args:
+                    # Item itself is the args (e.g. {"name": "x", "value": "y"})
+                    args = {k: v for k, v in item.items()
+                            if k not in ("tool_name", "function", "tool")}
+                # Normalise "name" → "key" for memory_save
+                if resolved == "memory_save" and "name" in args and "key" not in args:
+                    args["key"] = args.pop("name")
+                if args:
+                    results.append({"name": resolved, "arguments": args, "id": resolved})
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+    if results:
+        return results
+
+    # Pattern 7: "ha_call:..." hallucinated format with various namespace styles
+    # e.g. "ha_call:home_assistant:turn_on{entity_id:light.office}"
+    # e.g. "ha_call: /api/turn_off_light{device_id: "office_light"}"
+    _HA_CALL_COLON_RE = re.compile(
+        r'\bha[_\s]?call\s*:\s*(?:[\w/_]+\s*:\s*)?'   # optional namespace or /path/
+        r'(?P<action>turn[_\s]?off|turn[_\s]?on|toggle)\w*\s*'
+        r'\{(?P<args>[^}]+)\}',
+        re.IGNORECASE,
+    )
+    for m in _HA_CALL_COLON_RE.finditer(content):
+        action_key = re.sub(r"[_\s]", "", m.group("action").lower())
+        tool_name = _HA_ACTION_TOOL.get(action_key)
+        if not tool_name:
+            continue
+        raw_args = m.group("args")
+        args = {}
+        for pair in re.split(r"[,;]", raw_args):
+            if ":" in pair:
+                k, _, v = pair.partition(":")
+                args[k.strip().strip("\"'")] = v.strip().strip("\"'")
+            elif "=" in pair:
+                k, _, v = pair.partition("=")
+                args[k.strip().strip("\"'")] = v.strip().strip("\"'")
+        if args:
+            results.append({"name": tool_name, "arguments": args, "id": tool_name})
+
+    if results:
+        return results
+
+    # Pattern 6: hallucinated HA command syntax
+    # e.g. "hacommand: home.turnofflight lightid: light.office"
+    _HA_HALLUC_RE = re.compile(
+        r'\b(?:ha[_\s]?command|homeassistant[_\s]?(?:command|cmd)?)\s*:\s*'
+        r'(?:home\.)?(?P<action>turn[_\s]?off|turn[_\s]?on|toggle)\w*\s+'
+        r'(?:light[_\s]?id|entity[_\s]?id|lightid|entityid|entity|id)\s*:\s*(?P<entity>[\w.]+)',
+        re.IGNORECASE,
+    )
+    _HA_ACTION_MAP = {
+        "turnoff": "ha_turn_off", "turn_off": "ha_turn_off",
+        "turnon": "ha_turn_on", "turn_on": "ha_turn_on",
+        "toggle": "ha_toggle",
+    }
+    for m in _HA_HALLUC_RE.finditer(content):
+        action_raw = re.sub(r'[_\s]', '', m.group("action").lower())
+        # Strip trailing "light" suffix (e.g. "turnofflight" → "turnoff")
+        for suffix in ("light", "device", "entity"):
+            if action_raw.endswith(suffix):
+                action_raw = action_raw[: -len(suffix)]
+        tool_name = _HA_ACTION_MAP.get(action_raw)
+        if tool_name:
+            results.append({
+                "name": tool_name,
+                "arguments": {"entity_id": m.group("entity")},
+                "id": tool_name,
+            })
+
     return results
 
 
@@ -501,11 +702,52 @@ def _maybe_inject_entity_hint(search_result: str, user_message: str) -> str:
         return search_result
 
 
+async def _find_todo_item_by_name(user_id: int, list_name: str, item_query: str) -> tuple[int | None, str | None]:
+    """Find a todo item in list_name that best matches item_query. Returns (item_id, content) or (None, None)."""
+    import difflib
+    import re as _re
+    list_name = _re.sub(r"\s+lists?$", "", list_name, flags=_re.IGNORECASE).strip()
+    try:
+        items = await db.get_todo_items(user_id, list_name)
+    except Exception:
+        return None, None
+    if not items:
+        return None, None
+    query_lower = item_query.lower().strip()
+    contents_lower = [item["content"].lower() for item in items]
+    for item in items:
+        if item["content"].lower() == query_lower:
+            return item["id"], item["content"]
+    for item in items:
+        c = item["content"].lower()
+        if query_lower in c or c in query_lower:
+            return item["id"], item["content"]
+    stop_words = {"the", "a", "an", "my", "i", "have"}
+    query_words = set(query_lower.split()) - stop_words
+    best_item, best_score = None, 0
+    for item in items:
+        score = sum(1 for w in query_words if w in item["content"].lower().split())
+        if score > best_score:
+            best_score, best_item = score, item
+    if best_item and best_score > 0:
+        return best_item["id"], best_item["content"]
+    close = difflib.get_close_matches(query_lower, contents_lower, n=1, cutoff=0.5)
+    if close:
+        for item in items:
+            if item["content"].lower() == close[0]:
+                return item["id"], item["content"]
+    return None, None
+
+
 async def chat(user_id: int, user_message: str) -> str:
     """
     Process a user message through the Ollama agent loop.
     Returns the assistant's final reply as a string.
     """
+    # Normalize Telegram smart/curly quotes → ASCII so all regex patterns match cleanly
+    user_message = (user_message
+        .replace("“", '"').replace("”", '"')
+        .replace("‘", "'").replace("’", "'"))
     logger.info(f"chat() called for user {user_id}: {user_message[:80]!r}")
     grounded = _inject_date_context(user_message)
     grounded_dates = _extract_date_parts(grounded)
@@ -514,7 +756,7 @@ async def chat(user_id: int, user_message: str) -> str:
     _memory_saved = False
 
     memories = await db.get_memories(user_id)
-    all_tools = TOOL_DEFINITIONS
+    all_tools = get_active_tool_definitions()
 
     # Python-level intercept: answer simple "what is my X" questions directly from memory
     # so the model can't hallucinate/expand saved values.
@@ -534,10 +776,274 @@ async def chat(user_id: int, user_message: str) -> str:
                 _history[user_id].append({"role": "assistant", "content": reply})
                 return reply
 
+    # Pre-model intercepts: bypass the model entirely for queries we can always handle
+    # deterministically. This prevents hallucination and prompt-injection contamination.
+
+    # Reminder list
+    _LIST_REMINDER_WORDS = ("what reminders", "list reminders", "show reminders",
+                            "my reminders", "reminders do i have", "any reminders")
+    if any(w in user_message.lower() for w in _LIST_REMINDER_WORDS):
+        logger.info("Pre-model reminder list intercept")
+        fallback_result = await handle_tool_call("reminder_list", {}, user_id)
+        _history[user_id].append({"role": "assistant", "content": fallback_result})
+        return fallback_result
+
+    # Reminder delete by name
+    _DELETE_REMINDER_RE = re.compile(
+        r"\b(?:delete|remove|cancel|dismiss|clear|get\s+rid\s+of)\b.{0,30}?\breminder\b",
+        re.IGNORECASE,
+    )
+    if _DELETE_REMINDER_RE.search(user_message):
+        reminders = await db.get_reminders(user_id)
+        if reminders:
+            # If only one reminder exists, delete it directly
+            if len(reminders) == 1:
+                target = reminders[0]
+            else:
+                # Fuzzy-match: find the reminder whose message best overlaps the user's words
+                msg_lower = user_message.lower()
+                best, best_score = None, 0
+                for r in reminders:
+                    score = sum(1 for w in r["message"].lower().split() if w in msg_lower)
+                    if score > best_score:
+                        best_score, best = score, r
+                target = best if best_score > 0 else None
+            if target:
+                logger.info(f"Pre-model reminder delete intercept: id={target['id']} msg={target['message']!r}")
+                result = await handle_tool_call("reminder_delete", {"reminder_id": target["id"]}, user_id)
+                quip = await _personality_quip(result, "deleting this reminder")
+                reply = quip if quip else result
+                _history[user_id].append({"role": "assistant", "content": reply})
+                return reply
+
+    # Reminder snooze
+    _SNOOZE_RE = re.compile(r"\b(?:snooze|delay|postpone|remind\s+me\s+again)\b", re.IGNORECASE)
+    if _SNOOZE_RE.search(user_message):
+        _dur_match = re.search(
+            r"(?:for\s+)?(\d+\s*(?:min(?:utes?|s)?|hr?s?|hours?|days?))",
+            user_message, re.IGNORECASE,
+        )
+        if _dur_match:
+            _duration_str = _dur_match.group(1).strip()
+            _last_id = sched.get_last_fired_reminder_id(user_id)
+            if _last_id:
+                logger.info(f"Pre-model snooze intercept: id={_last_id}, duration={_duration_str!r}")
+                result = await handle_tool_call("reminder_snooze", {"duration": _duration_str, "reminder_id": _last_id}, user_id)
+                quip = await _personality_quip(result, "this reminder snooze")
+                reply = quip if quip else result
+                _history[user_id].append({"role": "assistant", "content": reply})
+                return reply
+
+    # HA turn on/off/toggle — only if we can fully resolve the entity from memory
+    if Config.HA_URL:
+        ha_tool, ha_entity = _parse_ha_request(user_message, memories)
+        if ha_tool and ha_entity:
+            logger.info(f"Pre-model HA intercept: {ha_tool}(entity_id={ha_entity!r})")
+            fallback_result = await handle_tool_call(ha_tool, {"entity_id": ha_entity}, user_id)
+            quip = await _personality_quip(fallback_result, "this Home Assistant action")
+            reply = quip if quip else fallback_result
+            _history[user_id].append({"role": "assistant", "content": reply})
+            return reply
+
+    # Weather
+    if Config.HA_WEATHER_ENTITY:
+        _WEATHER_WORDS = ("weather", "temperature", "forecast", "outside", "rain", "sunny", "cold", "hot", "humid")
+        if any(w in user_message.lower() for w in _WEATHER_WORDS):
+            logger.info("Pre-model weather intercept")
+            fallback_result = await handle_tool_call("ha_get_weather", {}, user_id)
+            quip = await _personality_quip(fallback_result, "the current weather conditions")
+            reply = fallback_result + ("\n\n" + quip if quip else "")
+            _history[user_id].append({"role": "assistant", "content": reply})
+            return reply
+
+    # Helper: strip ASCII and Unicode curly/smart quotes that Telegram inserts
+    _SMART_QUOTES = "\u201c\u201d\u2018\u2019"
+
+    def _sq(s):
+        return s.strip().strip("\'\"" + _SMART_QUOTES)
+
+    # To-do: create list
+    _CREATE_LIST_RE = re.compile(
+        r"\b(?:create|make|start)\s+(?:a\s+)?(?:new\s+)?(?:to-?do\s+|task\s+)?list\s+(?:called|named|titled|for)?\s*[\"\']?([^\"\'?\n]{2,40}?)[\"\']?\s*\??$",
+        re.IGNORECASE,
+    )
+    _cl_match = _CREATE_LIST_RE.search(user_message)
+    if _cl_match:
+        _lname = _sq(_cl_match.group(1))
+        logger.info(f"Pre-model todo create list intercept: name={_lname!r}")
+        result = await handle_tool_call("todo_create_list", {"name": _lname}, user_id)
+        _history[user_id].append({"role": "assistant", "content": result})
+        return result
+
+    # To-do: delete item from list — "delete/remove X from Y", "remove X from Y list"
+    # Must come before the delete-list intercept to avoid "remove X from Y list" being
+    # misread as a list named "X from Y".
+    _DEL_ITEM_RE = re.compile(
+        r"\b(?:delete|remove|erase|cross\s+off)\s+(?:the\s+)?(?:task|item|entry|to-?do)?\s*"
+        r"[\"\'“”‘’]?(.+?)[\"\'“”‘’]?"
+        r"\s+from\s+(?:(?:the|my)\s+)?[\"\'“”‘’]?"
+        r"([A-Za-z][\w\s]{1,30}?)[\"\'“”‘’]?\s*(?:list\b)?\s*\??$",
+        re.IGNORECASE,
+    )
+    _di_match = _DEL_ITEM_RE.search(user_message)
+    if _di_match:
+        _item_q = _sq(_di_match.group(1))
+        _list_q = _sq(_di_match.group(2)).strip()
+        logger.info(f"Pre-model todo delete item intercept: item={_item_q!r} list={_list_q!r}")
+        _item_id, _matched = await _find_todo_item_by_name(user_id, _list_q, _item_q)
+        if _item_id is not None:
+            await handle_tool_call("todo_delete_item", {"item_id": _item_id}, user_id)
+            reply = f"Deleted '{_matched}' from the '{_list_q}' list."
+        else:
+            reply = f"I couldn't find '{_item_q}' on the '{_list_q}' list."
+        _history[user_id].append({"role": "assistant", "content": reply})
+        return reply
+
+    # To-do: delete list
+    _DEL_LIST_RE1 = re.compile(
+        r"\b(?:delete|remove|drop)\s+(?:the\s+)?list\s+(?:called|named|titled)?\s*[\"\']?([^\"\'?\n]{2,40}?)[\"\']?\s*\??$",
+        re.IGNORECASE,
+    )
+    _DEL_LIST_RE2 = re.compile(
+        r"\b(?:delete|remove|drop)\s+(?:the\s+)?[\"\']?([^\"\'?\n]{2,40}?)[\"\']?\s+list\b",
+        re.IGNORECASE,
+    )
+    _dl_match = _DEL_LIST_RE1.search(user_message) or _DEL_LIST_RE2.search(user_message)
+    if _dl_match:
+        _lname = _sq(_dl_match.group(1))
+        logger.info(f"Pre-model todo delete list intercept: name={_lname!r}")
+        result = await handle_tool_call("todo_delete_list", {"name": _lname}, user_id)
+        _history[user_id].append({"role": "assistant", "content": result})
+        return result
+
+    # To-do: add item to list (always internal todo - AnyList is read-only from the bot)
+    # Three patterns in order: "add X to list called Y", "add X to Y list", "add X to Y"
+    _ADD_1_RE = re.compile(
+        r"\badd\s+[\"\']?(.+?)[\"\']?\s+to\s+(?:the\s+)?list\s+(?:called|named|titled)\s+[\"\']?([A-Za-z][\w\s]{1,30}?)[\"\']?\s*\??$",
+        re.IGNORECASE,
+    )
+    _ADD_2_RE = re.compile(
+        r"\badd\s+[\"\']?(.+?)[\"\']?\s+to\s+(?:(?:the|my)\s+)?([A-Za-z][\w\s]{1,30}?)\s+list\b",
+        re.IGNORECASE,
+    )
+    _ADD_3_RE = re.compile(
+        r"\badd\s+[\"\']?(.+?)[\"\']?\s+to\s+(?:(?:the|my)\s+)?([A-Za-z][\w\s]{1,30}?)\s*\??$",
+        re.IGNORECASE,
+    )
+    _ai_match = _ADD_1_RE.search(user_message) or _ADD_2_RE.search(user_message) or _ADD_3_RE.search(user_message)
+    if _ai_match:
+        _item_content = _sq(_ai_match.group(1))
+        _todo_list = _sq(_ai_match.group(2)).strip()
+        logger.info(f"Pre-model todo add item intercept: content={_item_content!r} list={_todo_list!r}")
+        result = await handle_tool_call("todo_add_item", {"list_name": _todo_list, "content": _item_content}, user_id)
+        if "not found" in result.lower() and Config.ANYLIST_EMAIL:
+            result += "\n\nNote: AnyList shopping lists (Groceries, Target, etc.) are read-only - add items directly in the AnyList app."
+        _history[user_id].append({"role": "assistant", "content": result})
+        return result
+
+    # To-do: mark item done — "i finished X on/in the Y list", "mark X as done in Y"
+    # Requires "list" at end of first pattern to prevent false positives.
+    _DONE_ITEM_RE1 = re.compile(
+        r"\b(?:i\s+(?:have\s+)?)?(?:finished|completed)\s+"
+        r"[\"\']?(.+?)[\"\']?"
+        r"\s+(?:on|in)\s+(?:(?:the|my)\s+)?[\"\']?"
+        r"([A-Za-z][\w\s]{1,30}?)[\"\']?\s+list\b",
+        re.IGNORECASE,
+    )
+    _DONE_ITEM_RE2 = re.compile(
+        r"\bmark\s+[\"\']?(.+?)[\"\']?"
+        r"\s+as\s+(?:done|complete(?:d)?|finished)\s+(?:on|in|from)\s+(?:(?:the|my)\s+)?[\"\']?"
+        r"([A-Za-z][\w\s]{1,30}?)[\"\']?\s*(?:list\b)?\s*\??$",
+        re.IGNORECASE,
+    )
+    _done_match = _DONE_ITEM_RE1.search(user_message) or _DONE_ITEM_RE2.search(user_message)
+    if _done_match:
+        _item_q = _sq(_done_match.group(1))
+        _list_q = _sq(_done_match.group(2)).strip()
+        logger.info(f"Pre-model todo complete item intercept: item={_item_q!r} list={_list_q!r}")
+        _item_id, _matched = await _find_todo_item_by_name(user_id, _list_q, _item_q)
+        if _item_id is not None:
+            await handle_tool_call("todo_update_item", {"item_id": _item_id, "done": True}, user_id)
+            reply = f"Marked '{_matched}' as done on the '{_list_q}' list."
+        else:
+            reply = f"I couldn't find '{_item_q}' on the '{_list_q}' list."
+        _history[user_id].append({"role": "assistant", "content": reply})
+        return reply
+
+    # List read: try AnyList first (if configured), fall back to internal todo
+    _STORE_RE_PRE = re.compile(
+        r"(?:what\s+do\s+i\s+need(?:\s+to\s+(?:get|buy|pick\s+up))?|"
+        r"what\s+(?:should\s+i\s+)?(?:get|buy|pick\s+up)|"
+        r"(?:need|have)\s+to\s+(?:get|buy|pick\s+up))"
+        r".{0,40}?(?:at|from)\s+([A-Za-z][\w\s]{1,25}?)(?:\s*\?|$)",
+        re.IGNORECASE,
+    )
+    _LIST_RE_PRE = re.compile(
+        r"what(?:'s|\s+(?:else\s+)?is)\s+(?:(?:on|in)\s+)?(?:my\s+)?([A-Za-z][\w\s]{1,25}?)\s+list",
+        re.IGNORECASE,
+    )
+    _sm_pre = _STORE_RE_PRE.search(user_message) or _LIST_RE_PRE.search(user_message)
+    if _sm_pre:
+        _list_name = _sm_pre.group(1).strip().rstrip("?").strip()
+        _list_name = re.sub(r"^the\s+", "", _list_name, flags=re.IGNORECASE).strip()
+        _list_name = re.sub(r"\s+(?:store|shop|supermarket|market|pharmacy)$", "", _list_name, flags=re.IGNORECASE).strip()
+        logger.info(f"Pre-model list read intercept: list_name={_list_name!r}")
+        # Try AnyList first if configured
+        if Config.ANYLIST_EMAIL:
+            anylist_result = await handle_tool_call("anylist_get_list", {"list_name": _list_name}, user_id)
+            if not anylist_result.startswith("Tool error:"):
+                _history[user_id].append({"role": "assistant", "content": anylist_result})
+                return anylist_result
+            logger.info(f"AnyList has no list named {_list_name!r}, trying internal todo")
+        # Fall back to internal todo
+        todo_result = await handle_tool_call("todo_get_items", {"list_name": _list_name}, user_id)
+        _history[user_id].append({"role": "assistant", "content": todo_result})
+        return todo_result
+
+    # Meal plan
+    if Config.ANYLIST_EMAIL:
+        _MEAL_WORDS_PRE = ("dinner", "lunch", "breakfast", "meal", "meals", "supper", "eating", "food")
+        if any(w in user_message.lower() for w in _MEAL_WORDS_PRE):
+            today_str = datetime.now(ZoneInfo(Config.TIMEZONE)).strftime("%Y-%m-%d")
+            start_str = grounded_dates[0] if grounded_dates else today_str
+            end_str = grounded_dates[-1] if grounded_dates else today_str
+            logger.info(f"Pre-model meal plan intercept: {start_str} to {end_str}")
+            fallback_result = await handle_tool_call(
+                "anylist_get_meal_plan", {"start": start_str, "end": end_str}, user_id
+            )
+            quip = await _personality_quip(fallback_result)
+            reply = fallback_result + ("\n\n" + quip if quip else "")
+            _history[user_id].append({"role": "assistant", "content": reply})
+            return reply
+
+    # Web search — explicit "search for / look up / find out about X"
+    _SEARCH_CMD_RE = re.compile(
+        r"\b(?:search(?:\s+for)?|look\s+up|find(?:\s+(?:info(?:rmation)?(?:\s+on)?|out\s+about))?|google)\s+(?:for\s+)?(?:information\s+on\s+)?(.{3,})",
+        re.IGNORECASE,
+    )
+    _sm_search = _SEARCH_CMD_RE.search(user_message)
+    if _sm_search:
+        _search_query = _sm_search.group(1).strip().rstrip("?").strip()
+        logger.info(f"Pre-model web search intercept: query={_search_query!r}")
+        try:
+            from services import search as search_service
+            data = await search_service.search(_search_query)
+            results = data.get("results", [])
+            if results:
+                lines = []
+                for r in results[:3]:
+                    lines.append(f"• {r['title']}\n  {r['url']}\n  {r['snippet'][:200]}")
+                reply = "\n\n".join(lines)
+            else:
+                reply = f"No results found for '{_search_query}'."
+        except Exception as e:
+            reply = f"Search failed: {e}"
+        _history[user_id].append({"role": "assistant", "content": reply})
+        return reply
+
     messages = [{"role": "system", "content": _system_prompt(memories)}] + _history[user_id]
 
     MAX_ITERATIONS = 8
-    _fallback_content = None
     _reminder_fallback_tried = False
     for iteration in range(MAX_ITERATIONS):
         try:
@@ -607,31 +1113,63 @@ async def chat(user_id: int, user_message: str) -> str:
                 logger.info(f"Model wrote a fake tool call as text: {stripped[:120]!r}")
                 stripped = ""  # treat as empty so fallbacks can fire
 
-            # Fallback: meal plan query with empty model response
-            if not stripped and Config.ANYLIST_EMAIL and _fallback_content is None:
-                _MEAL_WORDS = ("dinner", "lunch", "breakfast", "meal", "meals", "supper", "eating", "food")
-                if any(w in user_message.lower() for w in _MEAL_WORDS):
-                    logger.info("Meal query fallback: injecting anylist_get_meal_plan result for model")
-                    today_str = datetime.now(ZoneInfo(Config.TIMEZONE)).strftime("%Y-%m-%d")
-                    start_str = grounded_dates[0] if grounded_dates else today_str
-                    end_str = grounded_dates[-1] if grounded_dates else today_str
-                    fallback_result = await handle_tool_call(
-                        "anylist_get_meal_plan", {"start": start_str, "end": end_str}, user_id
-                    )
-                    _fallback_content = fallback_result
-                    messages.append({
-                        "role": "assistant", "content": "",
-                        "tool_calls": [{"id": "meal_fb", "type": "function",
-                                        "function": {"name": "anylist_get_meal_plan",
-                                                     "arguments": {"start": start_str, "end": end_str}}}],
-                    })
-                    messages.append({"role": "tool", "tool_call_id": "meal_fb",
-                                     "name": "anylist_get_meal_plan", "content": fallback_result})
-                    continue  # give model one shot to respond with personality
+            # Fallback: meal plan query — fires on empty response OR capability denial
+            _DENIAL_RE = re.compile(
+                r"do\s+not\s+have\s+access|don[''`]t\s+have\s+(?:access|information)|"
+                r"cannot\s+(?:access|provide|tell|give|check|look\s+up)|"
+                r"can[''`]t\s+(?:access|provide|tell|give|check|look\s+up)|"
+                r"no\s+access\s+to|not\s+able\s+to\s+(?:access|provide)|"
+                r"I\s+am\s+not\s+(?:able|capable)|"
+                r"don[''`]t\s+have\s+that\s+information",
+                re.IGNORECASE,
+            )
+            _CLARIFICATION_RE = re.compile(
+                r"could\s+you\s+(?:please\s+)?(?:provide|clarify|specify|tell|give|share)|"
+                r"can\s+you\s+(?:please\s+)?(?:provide|clarify|specify|tell|give|share)|"
+                r"please\s+(?:provide|clarify|specify|share)|"
+                r"what\s+(?:specific\s+)?dates?|"
+                r"(?:start|end)\s+date|"
+                r"what\s+would\s+you\s+like\s+to\s+do",
+                re.IGNORECASE,
+            )
+            _model_denied = bool(_DENIAL_RE.search(stripped))
+            _model_confused = bool(_CLARIFICATION_RE.search(stripped))
+            # Bare HA fragment with no args: "ha.", "ha_turn_off", "haturnoff", etc.
+            _HA_FRAGMENT_RE = re.compile(r'^ha[_.]?\w*$', re.IGNORECASE)
+            _model_ha_fragment = bool(_HA_FRAGMENT_RE.match(stripped) and "entity_id" not in stripped)
+            # Model narrated an HA action instead of calling the tool
+            _HA_NARRATIVE_RE = re.compile(
+                r'(?:shutting|turning|switching)\s+(?:off|on|down|up)|'
+                r'(?:lights?|device)\s+(?:are\s+)?(?:now\s+)?(?:off|on)',
+                re.IGNORECASE,
+            )
+            _model_ha_narrative = (
+                bool(_HA_NARRATIVE_RE.search(stripped))
+                and bool(_HA_ACTION_RE.search(user_message))
+                and "entity_id" not in stripped
+            )
+            # Weather location confusion
+            _WEATHER_CONFUSION_RE = re.compile(
+                r'not\s+specified\s+a\s+location|no\s+location|location\s+(?:not\s+)?(?:specified|provided)|'
+                r'which\s+(?:city|location|place)|what\s+(?:city|location|place)',
+                re.IGNORECASE,
+            )
+            _model_weather_confused = (
+                bool(_WEATHER_CONFUSION_RE.search(stripped))
+                and any(w in user_message.lower() for w in ("weather", "temperature", "outside", "forecast"))
+            )
+            if _model_denied or _model_confused or _model_ha_fragment or _model_ha_narrative or _model_weather_confused:
+                reason = ("denied" if _model_denied else
+                          "HA fragment" if _model_ha_fragment else
+                          "HA narrative" if _model_ha_narrative else
+                          "weather confused" if _model_weather_confused else
+                          "asked clarification")
+                logger.info(f"Model {reason}: {stripped[:120]!r}")
+                stripped = ""  # treat as empty so fallbacks fire
 
-            # Fallback: reminder request with empty model response — parse and call directly
+            # Fallback: reminder create — fires unconditionally at iteration 0 if time is parseable
             _REMINDER_WORDS = ("remind", "reminder", "alarm", "alert", "notify", "notification")
-            if not stripped and not _reminder_fallback_tried:
+            if not _reminder_fallback_tried and iteration == 0:
                 if any(w in user_message.lower() for w in _REMINDER_WORDS):
                     _reminder_fallback_tried = True
                     now_local = datetime.now(ZoneInfo(Config.TIMEZONE))
@@ -642,64 +1180,16 @@ async def chat(user_id: int, user_message: str) -> str:
                         fallback_result = await handle_tool_call(
                             "reminder_create", {"message": parsed_msg, "fire_at": fire_at_str}, user_id
                         )
-                        _fallback_content = fallback_result
-                        messages.append({
-                            "role": "assistant", "content": "",
-                            "tool_calls": [{"id": "reminder_fb", "type": "function",
-                                            "function": {"name": "reminder_create",
-                                                         "arguments": {"message": parsed_msg, "fire_at": fire_at_str}}}],
-                        })
-                        messages.append({"role": "tool", "tool_call_id": "reminder_fb",
-                                         "name": "reminder_create", "content": fallback_result})
-                        continue  # let model respond with personality
+                        quip = await _personality_quip(fallback_result, "this reminder that was just set")
+                        reply = quip if quip else fallback_result
+                        _history[user_id].append({"role": "assistant", "content": reply})
+                        return reply
                     else:
                         logger.info("Reminder fallback: could not parse time/message from request")
 
-            # Fallback: "what do I need at/from [store]" or "what's on my [X] list" — fires
-            # even with a non-empty model response because the model commonly answers these
-            # with clarifying questions instead of calling anylist_get_list.
-            _STORE_RE = re.compile(
-                r"(?:what\s+do\s+i\s+need(?:\s+to\s+(?:get|buy|pick\s+up))?|"
-                r"what\s+(?:should\s+i\s+)?(?:get|buy|pick\s+up)|"
-                r"(?:need|have)\s+to\s+(?:get|buy|pick\s+up))"
-                r".{0,40}?(?:at|from)\s+([A-Za-z][\w\s]{1,25}?)(?:\s*\?|$)",
-                re.IGNORECASE,
-            )
-            _LIST_RE = re.compile(
-                r"what(?:'s|\s+is)\s+(?:on\s+)?(?:my\s+)?([A-Za-z][\w\s]{1,25}?)\s+list",
-                re.IGNORECASE,
-            )
-            if _fallback_content is None and Config.ANYLIST_EMAIL and iteration == 0:
-                _sm = _STORE_RE.search(user_message) or _LIST_RE.search(user_message)
-                if _sm:
-                    _list_name = _sm.group(1).strip().rstrip("?").strip()
-                    logger.info(f"Store/list fallback: extracted list name {_list_name!r}, calling anylist_get_list")
-                    fallback_result = await handle_tool_call("anylist_get_list", {"list_name": _list_name}, user_id)
-                    _fallback_content = fallback_result
-                    _history[user_id].append({"role": "assistant", "content": fallback_result})
-                    return fallback_result
-
-            # Fallback: shopping/grocery query with empty model response — discover lists
-            _SHOPPING_WORDS = ("grocery", "groceries", "shopping", "shopping list", "store", "need to get", "need to buy", "need to pick up")
-            if not stripped and _fallback_content is None and Config.ANYLIST_EMAIL:
-                if any(w in user_message.lower() for w in _SHOPPING_WORDS):
-                    logger.info("Shopping fallback: calling anylist_get_list() to discover lists")
-                    fallback_result = await handle_tool_call("anylist_get_list", {}, user_id)
-                    _fallback_content = fallback_result
-                    messages.append({
-                        "role": "assistant", "content": "",
-                        "tool_calls": [{"id": "shop_fb", "type": "function",
-                                        "function": {"name": "anylist_get_list", "arguments": {}}}],
-                    })
-                    messages.append({"role": "tool", "tool_call_id": "shop_fb",
-                                     "name": "anylist_get_list", "content": fallback_result})
-                    continue
-
             # Reject raw JSON blobs that aren't tool calls (already handled above)
             if not stripped:
-                if _fallback_content:
-                    content = _fallback_content
-                elif _memory_saved:
+                if _memory_saved:
                     content = "Noted."
                 else:
                     content = "That one eluded me entirely. Try rephrasing — I'm usually better than this."
@@ -766,6 +1256,10 @@ async def chat(user_id: int, user_message: str) -> str:
                 _history[user_id].append({"role": "assistant", "content": result})
                 return result
 
+            if _resolved_name == "reminder_list" and len(tool_calls) == 1:
+                _history[user_id].append({"role": "assistant", "content": result})
+                return result
+
             if _resolved_name == "get_calendar_events" and len(tool_calls) == 1:
                 header = "\U0001f4c5 Calendar events:\n\n"
                 reply = header + result
@@ -776,8 +1270,11 @@ async def chat(user_id: int, user_message: str) -> str:
                 _history[user_id].append({"role": "assistant", "content": result})
                 return result
 
-            # anylist_get_meal_plan: let the model format with personality (no direct-return)
-
+            if _resolved_name == "anylist_get_meal_plan" and len(tool_calls) == 1:
+                quip = await _personality_quip(result)
+                reply = result + ("\n\n" + quip if quip else "")
+                _history[user_id].append({"role": "assistant", "content": reply})
+                return reply
 
             messages.append({
                 "role": "tool",

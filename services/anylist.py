@@ -66,11 +66,35 @@ def _fetch_lists_sync() -> list[dict]:
     return _with_retry(fn)
 
 
+def _best_list_match(query: str, all_lists):
+    """Return the best-matching list for query, or None."""
+    import difflib
+    lower = query.lower().strip()
+    names_lower = [l.name.lower() for l in all_lists]
+    # 1. Exact match
+    for l in all_lists:
+        if l.name.lower() == lower:
+            return l
+    # 2. Substring match (query inside name or name inside query)
+    for l in all_lists:
+        n = l.name.lower()
+        if lower in n or n in lower:
+            return l
+    # 3. Fuzzy similarity (handles grocery/groceries, walmart/Walmart, etc.)
+    close = difflib.get_close_matches(lower, names_lower, n=1, cutoff=0.7)
+    if close:
+        return next(l for l in all_lists if l.name.lower() == close[0])
+    return None
+
+
 def _fetch_list_items_sync(list_name: str, include_checked: bool = False) -> list[dict]:
     def fn(client):
-        lst = client.get_list_by_name(list_name)
-        if lst is None:
-            raise ValueError(f"List '{list_name}' not found.")
+        all_lists = list(client.get_lists())
+        match = _best_list_match(list_name, all_lists)
+        if match is None:
+            available = ", ".join(l.name for l in all_lists)
+            raise RuntimeError(f"List '{list_name}' not found. Available lists: {available}")
+        lst = client.get_list_by_name(match.name)
         items = [_item_to_dict(item) for item in (lst.items or [])]
         if not include_checked:
             items = [i for i in items if not i["checked"]]
@@ -132,7 +156,6 @@ def _fetch_meal_plan_sync(start_str: str, end_str: str) -> list[dict]:
         event_date = dtstart.dt
         if isinstance(event_date, datetime):
             event_date = event_date.date()
-        logger.info(f"iCal event: {component.get('SUMMARY')!r} on {event_date}")
         if start_dt <= event_date <= end_dt:
             notes = str(component.get("DESCRIPTION", "") or "").strip()
             meals.append({
