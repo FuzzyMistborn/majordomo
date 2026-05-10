@@ -2,8 +2,13 @@
 Home Assistant integration via REST API with long-lived access token.
 """
 
+import re
+
 import httpx
 from config import Config
+
+_HA_NAME_RE = re.compile(r"^[a-zA-Z0-9_]+$")
+_HA_ENTITY_ID_RE = re.compile(r"^[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+$")
 
 def _headers() -> dict:
     return {
@@ -23,7 +28,8 @@ async def get_states(domains: list[str] | None = None) -> list[dict]:
         return []
     allowed = set(Config.HA_ALLOWED_DOMAINS)
     if domains:
-        allowed = allowed & set(domains)
+        requested = {d for d in domains if isinstance(d, str) and _HA_NAME_RE.fullmatch(d)}
+        allowed = allowed & requested
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(f"{_base()}/api/states", headers=_headers())
         resp.raise_for_status()
@@ -48,8 +54,15 @@ async def call_service(domain: str, service: str, entity_id: str, extra: dict | 
     """Call any HA service."""
     if not _enabled():
         raise RuntimeError("Home Assistant is not configured.")
+    if not _HA_NAME_RE.fullmatch(domain) or not _HA_NAME_RE.fullmatch(service):
+        raise ValueError("Invalid Home Assistant domain or service.")
+    if not _HA_ENTITY_ID_RE.fullmatch(entity_id):
+        raise ValueError("Invalid Home Assistant entity_id.")
     if domain not in Config.HA_ALLOWED_DOMAINS:
         raise PermissionError(f"Domain '{domain}' is not in the allowed domains list.")
+    entity_domain = entity_id.split(".")[0]
+    if entity_domain != domain:
+        raise PermissionError("Service domain must match the target entity domain.")
     payload = {"entity_id": entity_id}
     if extra:
         payload.update(extra)
@@ -66,6 +79,8 @@ async def get_entity_state(entity_id: str) -> dict:
     """Get state of a single entity."""
     if not _enabled():
         raise RuntimeError("Home Assistant is not configured.")
+    if not _HA_ENTITY_ID_RE.fullmatch(entity_id):
+        raise ValueError("Invalid Home Assistant entity_id.")
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(f"{_base()}/api/states/{entity_id}", headers=_headers())
         resp.raise_for_status()

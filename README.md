@@ -80,6 +80,8 @@ Just send natural language messages. Examples:
 | `"Search for the latest Fedora Kinoite release"` | Searches Tavily, returns summary + links |
 | `"Turn off the living room lights"` | Calls HA service |
 | `"Remember that the office light is light.office_main"` | Saves a fact to persistent memory |
+| `"List personalities"` | Shows configured bot personalities |
+| `"Switch personality to plain"` | Sets your active personality without affecting other users |
 
 ### Commands
 
@@ -177,7 +179,15 @@ docker run --rm -v majordomo_bot_data:/data -v $(pwd):/backup \
 
 ## Personality
 
-The bot's voice is defined in `personality.md`. By default it responds as Wit (Hoid from the Cosmere) — dry, sardonic, brief. You can replace `personality.md` with any system prompt to change the character entirely.
+The bot loads personalities from Markdown files in `personalities/`. Each filename becomes the personality name, so `personalities/plain.md` is selected with:
+
+```text
+Switch personality to plain
+```
+
+The selected personality is stored per Telegram user and can be changed on the fly. Use `List personalities` to see available options and `What personality are you using?` to check the current one.
+
+`personality.md` is still supported as the legacy default Wit prompt.
 
 ---
 

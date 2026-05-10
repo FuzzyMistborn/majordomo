@@ -4,6 +4,7 @@ Tool definitions and handlers for the Ollama AI agent.
 
 import json
 import logging
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -620,6 +621,8 @@ def _normalize_reminder_args(args: dict) -> dict:
 
 _HA_ENTITY_PARAM_ALIASES = ("lightid", "light_id", "entity", "device", "device_id", "id", "light")
 _HA_TOOLS = frozenset({"ha_turn_on", "ha_turn_off", "ha_toggle", "ha_call_service", "ha_get_state", "ha_get_states"})
+_HA_ENTITY_ID_RE = re.compile(r"^[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+$")
+_HA_SERVICE_RE = re.compile(r"^[a-zA-Z0-9_]+$")
 
 
 async def _normalize_ha_args(name: str, args: dict, user_id: int) -> dict:
@@ -742,7 +745,7 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
                 return "\n".join(lines)
 
             case "todo_delete_item":
-                ok = await db.delete_todo_item(args["item_id"])
+                ok = await db.delete_todo_item(args["item_id"], user_id)
                 return "Item deleted." if ok else f"Item id={args['item_id']} not found."
 
             case "todo_clear_list":
@@ -897,6 +900,8 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
                 if not (Config.HA_URL and Config.HA_TOKEN):
                     return "Home Assistant is not configured."
                 entity_id = args["entity_id"]
+                if not _HA_ENTITY_ID_RE.fullmatch(entity_id):
+                    return "Error: invalid Home Assistant entity_id."
                 domain = entity_id.split(".")[0]
                 await ha.call_service(domain, "turn_on", entity_id)
                 return f"Turned on {entity_id}."
@@ -905,6 +910,8 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
                 if not (Config.HA_URL and Config.HA_TOKEN):
                     return "Home Assistant is not configured."
                 entity_id = args["entity_id"]
+                if not _HA_ENTITY_ID_RE.fullmatch(entity_id):
+                    return "Error: invalid Home Assistant entity_id."
                 domain = entity_id.split(".")[0]
                 await ha.call_service(domain, "turn_off", entity_id)
                 return f"Turned off {entity_id}."
@@ -913,7 +920,10 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
                 if not (Config.HA_URL and Config.HA_TOKEN):
                     return "Home Assistant is not configured."
                 entity_id = args["entity_id"]
-                await ha.call_service("homeassistant", "toggle", entity_id)
+                if not _HA_ENTITY_ID_RE.fullmatch(entity_id):
+                    return "Error: invalid Home Assistant entity_id."
+                domain = entity_id.split(".")[0]
+                await ha.call_service(domain, "toggle", entity_id)
                 return f"Toggled {entity_id}."
 
             case "ha_call_service":
@@ -924,6 +934,13 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
                 service = args.get("service", "")
                 if not domain or not service:
                     return "Error: ha_call_service requires domain, service, and entity_id."
+                if not _HA_ENTITY_ID_RE.fullmatch(entity_id):
+                    return "Error: invalid Home Assistant entity_id."
+                if not _HA_SERVICE_RE.fullmatch(domain) or not _HA_SERVICE_RE.fullmatch(service):
+                    return "Error: invalid Home Assistant domain or service."
+                entity_domain = entity_id.split(".")[0]
+                if domain != entity_domain:
+                    return "Error: Home Assistant service domain must match the entity domain."
                 extra = {k: v for k, v in args.items() if k not in ("domain", "service", "entity_id")}
                 await ha.call_service(domain, service, entity_id, extra or None)
                 return f"Called {domain}.{service} on {entity_id}."
@@ -931,6 +948,8 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
             case "ha_get_state":
                 if not (Config.HA_URL and Config.HA_TOKEN):
                     return "Home Assistant is not configured."
+                if not _HA_ENTITY_ID_RE.fullmatch(args["entity_id"]):
+                    return "Error: invalid Home Assistant entity_id."
                 state = await ha.get_entity_state(args["entity_id"])
                 return f"{state['friendly_name']} ({state['entity_id']}): {state['state']}"
 

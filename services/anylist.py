@@ -129,7 +129,7 @@ def _fetch_meal_plan_sync(start_str: str, end_str: str) -> list[dict]:
     if not url:
         raise ValueError("Could not retrieve AnyList meal plan calendar URL.")
 
-    logger.info(f"Fetching AnyList iCal feed from: {url[:80]}...")
+    logger.info("Fetching AnyList iCal feed.")
     import httpx
     with httpx.Client(follow_redirects=True, timeout=15) as http:
         resp = http.get(url)

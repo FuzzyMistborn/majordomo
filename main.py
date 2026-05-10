@@ -81,7 +81,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• _\"What's on my calendar this week?\"_\n"
         "• _\"Turn off the office light\"_\n"
         "• _\"Every morning at 7am give me a smart summary of my day\"_\n"
-        "• _\"Search for information on a boring new product\"_",
+        "• _\"Search for information on a boring new product\"_\n"
+        "• _\"List personalities\"_\n"
+        "• _\"Switch personality to plain\"_",
         parse_mode="Markdown",
     )
 

@@ -51,10 +51,26 @@ CREATE TABLE IF NOT EXISTS memories (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(user_id, key)
 );
+
+CREATE TABLE IF NOT EXISTS user_settings (
+    user_id INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(user_id, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_todo_lists_user_name ON todo_lists(user_id, name);
+CREATE INDEX IF NOT EXISTS idx_todo_items_list_created ON todo_items(list_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_reminders_user_active ON reminders(user_id, fired, recurrence, fire_at);
+CREATE INDEX IF NOT EXISTS idx_reminders_active_fire_at ON reminders(fired, recurrence, fire_at);
+CREATE INDEX IF NOT EXISTS idx_memories_user_key ON memories(user_id, key);
+CREATE INDEX IF NOT EXISTS idx_user_settings_user_key ON user_settings(user_id, key);
 """
 
 async def init_db():
     async with aiosqlite.connect(DB) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
         await db.executescript(CREATE_TABLES)
         # Migrate: add smart column if it doesn't exist yet
         try:
@@ -95,8 +111,15 @@ async def get_todo_lists(user_id: int) -> list[dict]:
 async def delete_todo_list(user_id: int, list_name: str) -> bool:
     async with aiosqlite.connect(DB) as db:
         cur = await db.execute(
-            "DELETE FROM todo_lists WHERE user_id = ? AND LOWER(name) = LOWER(?)", (user_id, list_name)
+            "SELECT id FROM todo_lists WHERE user_id = ? AND LOWER(name) = LOWER(?)",
+            (user_id, list_name),
         )
+        row = await cur.fetchone()
+        if row is None:
+            return False
+        list_id = row[0]
+        await db.execute("DELETE FROM todo_items WHERE list_id = ?", (list_id,))
+        cur = await db.execute("DELETE FROM todo_lists WHERE id = ?", (list_id,))
         await db.commit()
         return cur.rowcount > 0
 
@@ -138,7 +161,7 @@ async def get_todo_items(user_id: int, list_name: str) -> list[dict]:
         return [dict(r) for r in rows]
 
 
-async def update_todo_item(item_id: int, content: str | None = None, done: bool | None = None) -> bool:
+async def update_todo_item(item_id: int, content: str | None = None, done: bool | None = None, user_id: int | None = None) -> bool:
     fields, vals = [], []
     if content is not None:
         fields.append("content = ?")
@@ -151,16 +174,37 @@ async def update_todo_item(item_id: int, content: str | None = None, done: bool 
     fields.append("updated_at = CURRENT_TIMESTAMP")
     vals.append(item_id)
     async with aiosqlite.connect(DB) as db:
-        cur = await db.execute(
-            f"UPDATE todo_items SET {', '.join(fields)} WHERE id = ?", vals
-        )
+        if user_id is None:
+            cur = await db.execute(
+                f"UPDATE todo_items SET {', '.join(fields)} WHERE id = ?", vals
+            )
+        else:
+            vals.append(user_id)
+            cur = await db.execute(
+                f"""UPDATE todo_items SET {', '.join(fields)}
+                    WHERE id = ?
+                    AND list_id IN (
+                        SELECT id FROM todo_lists WHERE user_id = ?
+                    )""",
+                vals,
+            )
         await db.commit()
         return cur.rowcount > 0
 
 
-async def delete_todo_item(item_id: int) -> bool:
+async def delete_todo_item(item_id: int, user_id: int | None = None) -> bool:
     async with aiosqlite.connect(DB) as db:
-        cur = await db.execute("DELETE FROM todo_items WHERE id = ?", (item_id,))
+        if user_id is None:
+            cur = await db.execute("DELETE FROM todo_items WHERE id = ?", (item_id,))
+        else:
+            cur = await db.execute(
+                """DELETE FROM todo_items
+                   WHERE id = ?
+                   AND list_id IN (
+                       SELECT id FROM todo_lists WHERE user_id = ?
+                   )""",
+                (item_id, user_id),
+            )
         await db.commit()
         return cur.rowcount > 0
 
@@ -353,3 +397,28 @@ async def delete_memory(user_id: int, key: str) -> bool:
         )
         await db.commit()
         return cur.rowcount > 0
+
+
+# ── User Settings ─────────────────────────────────────────────────────────────
+
+async def save_user_setting(user_id: int, key: str, value: str) -> None:
+    async with aiosqlite.connect(DB) as db:
+        await db.execute(
+            """INSERT INTO user_settings (user_id, key, value)
+               VALUES (?, ?, ?)
+               ON CONFLICT(user_id, key) DO UPDATE SET
+                   value = excluded.value,
+                   updated_at = CURRENT_TIMESTAMP""",
+            (user_id, key, value),
+        )
+        await db.commit()
+
+
+async def get_user_setting(user_id: int, key: str) -> str | None:
+    async with aiosqlite.connect(DB) as db:
+        cur = await db.execute(
+            "SELECT value FROM user_settings WHERE user_id = ? AND key = ?",
+            (user_id, key),
+        )
+        row = await cur.fetchone()
+        return row[0] if row else None

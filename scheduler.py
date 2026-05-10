@@ -40,7 +40,7 @@ async def _send_message(user_id: int, text: str):
     try:
         # Split long messages
         for i in range(0, len(text), 4096):
-            await _bot.send_message(chat_id=user_id, text=text[i:i+4096], parse_mode="Markdown")
+            await _bot.send_message(chat_id=user_id, text=text[i:i+4096])
     except Exception as e:
         logger.error(f"Failed to send message to {user_id}: {e}")
 
@@ -54,14 +54,14 @@ async def _run_smart_reminder(reminder_id: int, user_id: int, instruction: str):
         from ai.agent import chat
         logger.info(f"Running smart reminder {reminder_id} for user {user_id}: {instruction[:80]}")
         result = await chat(user_id, instruction)
-        await _send_message(user_id, f"🌅 *Morning Briefing:*\n\n{result}")
+        await _send_message(user_id, f"🌅 Morning Briefing:\n\n{result}")
     except Exception as e:
         logger.error(f"Smart reminder {reminder_id} failed: {e}", exc_info=True)
-        await _send_message(user_id, f"⏰ *Reminder:*\n{instruction}\n\n_(Could not generate dynamic summary: {e})_")
+        await _send_message(user_id, f"⏰ Reminder:\n{instruction}\n\nCould not generate dynamic summary: {e}")
 
 
 async def _fire_reminder(reminder_id: int, user_id: int, message: str, original_time: str, late: bool = False):
-    prefix = f"⏰ *Reminder* (originally scheduled for {original_time}):\n" if late else "⏰ *Reminder:*\n"
+    prefix = f"⏰ Reminder (originally scheduled for {original_time}):\n" if late else "⏰ Reminder:\n"
     await _send_message(user_id, f"{prefix}{message}")
 
 
@@ -79,7 +79,7 @@ async def _recurring_job(reminder_id: int, user_id: int, message: str, fire_at: 
     if smart:
         await _run_smart_reminder(reminder_id, user_id, message)
     else:
-        await _send_message(user_id, f"⏰ *Reminder:*\n{message}")
+        await _send_message(user_id, f"⏰ Reminder:\n{message}")
 
 
 def _parse_recurrence_to_cron(recurrence_json: str) -> CronTrigger | None:

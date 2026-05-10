@@ -25,30 +25,105 @@ _KNOWN_TOOLS: frozenset[str] = frozenset(
     {td["function"]["name"] for td in TOOL_DEFINITIONS} | set(_TOOL_ALIASES.keys())
 )
 
-# Personality loaded lazily on first use
-_personality = None
+# Personalities are loaded lazily and cached by slug.
+_personality_cache: dict[str, str] = {}
+_PERSONALITY_SETTING_KEY = "personality"
+_DEFAULT_PERSONALITY = "wit"
 
 
-def _load_personality() -> str:
-    global _personality
-    if _personality is not None:
-        return _personality
-    for path in ["/app/personality.md", "personality.md"]:
+def _personality_dirs() -> list[str]:
+    return ["/app/personalities", "personalities"]
+
+
+def _personality_paths(name: str) -> list[str]:
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "", name.lower())
+    paths = [os.path.join(path, f"{safe_name}.md") for path in _personality_dirs()]
+    if safe_name in (_DEFAULT_PERSONALITY, "default"):
+        paths.extend(["/app/personality.md", "personality.md"])
+    return paths
+
+
+def _available_personalities() -> dict[str, str]:
+    found: dict[str, str] = {}
+    for directory in _personality_dirs():
         try:
-            with open(path) as f:
-                _personality = f.read().strip()
-            logger.info(f"Loaded personality from {path} ({len(_personality)} chars)")
-            return _personality
+            for filename in os.listdir(directory):
+                if not filename.endswith(".md"):
+                    continue
+                slug = filename[:-3].lower()
+                found[slug] = slug
         except FileNotFoundError:
             continue
-    logger.warning("personality.md not found — running without personality file")
-    _personality = ""
-    return _personality
+    for path in ["/app/personality.md", "personality.md"]:
+        if os.path.exists(path):
+            found.setdefault(_DEFAULT_PERSONALITY, _DEFAULT_PERSONALITY)
+            break
+    return dict(sorted(found.items()))
 
 
-async def _personality_quip(result: str, context: str = "this") -> str:
+def _resolve_personality_name(requested: str | None) -> str | None:
+    available = _available_personalities()
+    if not available:
+        return None
+    if not requested:
+        return _DEFAULT_PERSONALITY if _DEFAULT_PERSONALITY in available else next(iter(available))
+    normalized = re.sub(r"[^a-zA-Z0-9_-]", "", requested.lower().strip())
+    if normalized in available:
+        return normalized
+    aliases = {
+        "default": _DEFAULT_PERSONALITY,
+        "hoid": "wit",
+    }
+    alias = aliases.get(normalized)
+    if alias in available:
+        return alias
+    return None
+
+
+def _load_personality(name: str | None = None) -> str:
+    resolved = _resolve_personality_name(name)
+    if not resolved:
+        logger.warning("No personality prompts found — running without personality file")
+        return ""
+    if resolved in _personality_cache:
+        return _personality_cache[resolved]
+    for path in _personality_paths(resolved):
+        try:
+            with open(path) as f:
+                personality = f.read().strip()
+            _personality_cache[resolved] = personality
+            logger.info(f"Loaded personality {resolved!r} from {path} ({len(personality)} chars)")
+            return personality
+        except FileNotFoundError:
+            continue
+    logger.warning(f"Personality {resolved!r} was listed but could not be loaded")
+    _personality_cache[resolved] = ""
+    return ""
+
+
+async def _get_user_personality_name(user_id: int) -> str | None:
+    saved = await db.get_user_setting(user_id, _PERSONALITY_SETTING_KEY)
+    resolved = _resolve_personality_name(saved)
+    if resolved:
+        return resolved
+    return _resolve_personality_name(None)
+
+
+def _format_personality_list(current: str | None = None) -> str:
+    names = list(_available_personalities())
+    if not names:
+        return "No personalities are configured."
+    lines = ["Available personalities:"]
+    for name in names:
+        marker = " (current)" if name == current else ""
+        lines.append(f"- {name}{marker}")
+    return "\n".join(lines)
+
+
+async def _personality_quip(result: str, context: str = "this", user_id: int | None = None) -> str:
     """Make a constrained LLM call for a single in-character sentence reacting to result."""
-    personality = _load_personality()
+    personality_name = await _get_user_personality_name(user_id) if user_id is not None else None
+    personality = _load_personality(personality_name)
     if not personality:
         return ""
     try:
@@ -84,9 +159,9 @@ async def _personality_quip(result: str, context: str = "this") -> str:
 _history: dict[int, list[dict]] = defaultdict(list)
 
 
-def _system_prompt(memories: list[dict] | None = None) -> str:
+def _system_prompt(memories: list[dict] | None = None, personality_name: str | None = None) -> str:
     now = datetime.now(ZoneInfo(Config.TIMEZONE)).strftime("%A, %B %d %Y %H:%M %Z")
-    personality = _load_personality()
+    personality = _load_personality(personality_name)
     tz = ZoneInfo(Config.TIMEZONE)
     _now = datetime.now(tz)
     today = _now.strftime("%Y-%m-%d")
@@ -716,22 +791,51 @@ async def _find_todo_item_by_name(user_id: int, list_name: str, item_query: str)
         return None, None
     query_lower = item_query.lower().strip()
     contents_lower = [item["content"].lower() for item in items]
+
+    # Exact match
     for item in items:
         if item["content"].lower() == query_lower:
             return item["id"], item["content"]
+
+    # URL normalization: strip trailing slashes before comparison
+    query_norm = query_lower.rstrip("/")
+    for item in items:
+        if item["content"].lower().rstrip("/") == query_norm:
+            return item["id"], item["content"]
+
+    # Substring match
     for item in items:
         c = item["content"].lower()
         if query_lower in c or c in query_lower:
             return item["id"], item["content"]
-    stop_words = {"the", "a", "an", "my", "i", "have"}
+
+    # Word/fragment match — handle URL references like "the selfh.st link"
+    stop_words = {"the", "a", "an", "my", "i", "have", "link", "links", "url", "urls"}
     query_words = set(query_lower.split()) - stop_words
+    _url_domain_re = _re.compile(r'https?://([^/\s]+)')
     best_item, best_score = None, 0
     for item in items:
-        score = sum(1 for w in query_words if w in item["content"].lower().split())
+        content_lower = item["content"].lower()
+        content_words = set(content_lower.split())
+        score = 0
+        for w in query_words:
+            if "." in w or "/" in w:
+                # URL fragment: substring search in full content
+                if w in content_lower:
+                    score += 2
+                else:
+                    # Fuzzy match against URL domain
+                    dm = _url_domain_re.search(content_lower)
+                    if dm and difflib.SequenceMatcher(None, w, dm.group(1)).ratio() >= 0.7:
+                        score += 1
+            elif w in content_words:
+                score += 1
         if score > best_score:
             best_score, best_item = score, item
+
     if best_item and best_score > 0:
         return best_item["id"], best_item["content"]
+
     close = difflib.get_close_matches(query_lower, contents_lower, n=1, cutoff=0.5)
     if close:
         for item in items:
@@ -758,6 +862,47 @@ async def chat(user_id: int, user_message: str) -> str:
 
     memories = await db.get_memories(user_id)
     all_tools = get_active_tool_definitions()
+    personality_name = await _get_user_personality_name(user_id)
+
+    # Personality management is deterministic bot configuration, not model memory.
+    _PERSONALITY_LIST_RE = re.compile(
+        r"\b(?:list|show)\b.{0,40}\bpersonalit(?:y|ies)\b|"
+        r"\b(?:what|which)\s+personalit(?:y|ies)\s+(?:are\s+)?(?:available|configured|installed)\b",
+        re.IGNORECASE,
+    )
+    _PERSONALITY_CURRENT_RE = re.compile(
+        r"\b(?:current|active)\s+personalit(?:y|ies)\b|"
+        r"\bwhat\s+personalit(?:y|ies)\s+(?:are\s+you|am\s+i)\s+using\b",
+        re.IGNORECASE,
+    )
+    _PERSONALITY_SWITCH_RE = re.compile(
+        r"\b(?:switch|change|set|use)\s+(?:my\s+|the\s+|your\s+)?personality\s+"
+        r"(?:to|as)?\s*[\"']?([A-Za-z0-9_-]{2,40})[\"']?\s*$|"
+        r"\b(?:switch|change|set|use)\s+(?:to\s+)?[\"']?([A-Za-z0-9_-]{2,40})[\"']?\s+personality\s*$|"
+        r"\b(?:be|act\s+as)\s+[\"']?([A-Za-z0-9_-]{2,40})[\"']?\s+personality\s*$",
+        re.IGNORECASE,
+    )
+    if _PERSONALITY_LIST_RE.search(user_message):
+        reply = _format_personality_list(personality_name)
+        _history[user_id].append({"role": "assistant", "content": reply})
+        return reply
+    if _PERSONALITY_CURRENT_RE.search(user_message):
+        reply = f"Current personality: {personality_name or 'none'}."
+        _history[user_id].append({"role": "assistant", "content": reply})
+        return reply
+    _personality_switch = _PERSONALITY_SWITCH_RE.search(user_message)
+    if _personality_switch and "personality" in user_message.lower():
+        requested = next((g for g in _personality_switch.groups() if g), "").strip()
+        resolved = _resolve_personality_name(requested)
+        if not resolved:
+            reply = f"No personality named '{requested}' found.\n\n{_format_personality_list(personality_name)}"
+        else:
+            await db.save_user_setting(user_id, _PERSONALITY_SETTING_KEY, resolved)
+            personality_name = resolved
+            clear_history(user_id)
+            reply = f"Personality switched to {resolved}."
+        _history[user_id].append({"role": "assistant", "content": reply})
+        return reply
 
     # URL auto-add: if every non-empty line is a URL and url_auto_list is set in memory, add all.
     _URL_LINE_RE = re.compile(r'^\s*https?://\S+\s*$', re.IGNORECASE)
@@ -843,7 +988,7 @@ async def chat(user_id: int, user_message: str) -> str:
             if target:
                 logger.info(f"Pre-model reminder delete intercept: id={target['id']} msg={target['message']!r}")
                 result = await handle_tool_call("reminder_delete", {"reminder_id": target["id"]}, user_id)
-                quip = await _personality_quip(result, "deleting this reminder")
+                quip = await _personality_quip(result, "deleting this reminder", user_id)
                 reply = quip if quip else result
                 _history[user_id].append({"role": "assistant", "content": reply})
                 return reply
@@ -861,7 +1006,7 @@ async def chat(user_id: int, user_message: str) -> str:
             if _last_id:
                 logger.info(f"Pre-model snooze intercept: id={_last_id}, duration={_duration_str!r}")
                 result = await handle_tool_call("reminder_snooze", {"duration": _duration_str, "reminder_id": _last_id}, user_id)
-                quip = await _personality_quip(result, "this reminder snooze")
+                quip = await _personality_quip(result, "this reminder snooze", user_id)
                 reply = quip if quip else result
                 _history[user_id].append({"role": "assistant", "content": reply})
                 return reply
@@ -872,7 +1017,7 @@ async def chat(user_id: int, user_message: str) -> str:
         if ha_tool and ha_entity:
             logger.info(f"Pre-model HA intercept: {ha_tool}(entity_id={ha_entity!r})")
             fallback_result = await handle_tool_call(ha_tool, {"entity_id": ha_entity}, user_id)
-            quip = await _personality_quip(fallback_result, "this Home Assistant action")
+            quip = await _personality_quip(fallback_result, "this Home Assistant action", user_id)
             reply = quip if quip else fallback_result
             _history[user_id].append({"role": "assistant", "content": reply})
             return reply
@@ -896,7 +1041,7 @@ async def chat(user_id: int, user_message: str) -> str:
         if any(w in user_message.lower() for w in _WEATHER_WORDS):
             logger.info("Pre-model weather intercept")
             fallback_result = await handle_tool_call("ha_get_weather", {}, user_id)
-            quip = await _personality_quip(fallback_result, "the current weather conditions")
+            quip = await _personality_quip(fallback_result, "the current weather conditions", user_id)
             reply = fallback_result + ("\n\n" + quip if quip else "")
             _history[user_id].append({"role": "assistant", "content": reply})
             return reply
@@ -962,7 +1107,12 @@ async def chat(user_id: int, user_message: str) -> str:
             await handle_tool_call("todo_delete_item", {"item_id": _item_id}, user_id)
             reply = f"Deleted {_matched} from **{_list_q.title()}**."
         else:
+            # Check if the item lives in AnyList (read-only) so we can give a useful message
             reply = f"Couldn't find {_item_q} on **{_list_q.title()}**."
+            if Config.ANYLIST_EMAIL:
+                _al_check = await handle_tool_call("anylist_get_list", {"list_name": _list_q}, user_id)
+                if not _al_check.startswith("Tool error:") and _item_q.rstrip("/").lower() in _al_check.lower():
+                    reply = f"That item is in your AnyList — remove it from the AnyList app directly."
         _history[user_id].append({"role": "assistant", "content": reply})
         return reply
 
@@ -1032,7 +1182,13 @@ async def chat(user_id: int, user_message: str) -> str:
         _list_name = re.sub(r"^the\s+", "", _list_name, flags=re.IGNORECASE).strip()
         _list_name = re.sub(r"\s+(?:store|shop|supermarket|market|pharmacy)$", "", _list_name, flags=re.IGNORECASE).strip()
         logger.info(f"Pre-model list read intercept: list_name={_list_name!r}")
-        # Try AnyList first if configured
+        # If an internal list exists by this name, always prefer it (consistent with delete).
+        _internal_list_id = await db.get_list_id(user_id, re.sub(r"\s+lists?$", "", _list_name, flags=re.IGNORECASE).strip())
+        if _internal_list_id is not None:
+            todo_result = await handle_tool_call("todo_get_items", {"list_name": _list_name}, user_id)
+            _history[user_id].append({"role": "assistant", "content": todo_result})
+            return todo_result
+        # No internal list — try AnyList
         if Config.ANYLIST_EMAIL:
             anylist_result = await handle_tool_call("anylist_get_list", {"list_name": _list_name}, user_id)
             if not anylist_result.startswith("Tool error:"):
@@ -1055,7 +1211,7 @@ async def chat(user_id: int, user_message: str) -> str:
             fallback_result = await handle_tool_call(
                 "anylist_get_meal_plan", {"start": start_str, "end": end_str}, user_id
             )
-            quip = await _personality_quip(fallback_result)
+            quip = await _personality_quip(fallback_result, user_id=user_id)
             reply = fallback_result + ("\n\n" + quip if quip else "")
             _history[user_id].append({"role": "assistant", "content": reply})
             return reply
@@ -1085,7 +1241,7 @@ async def chat(user_id: int, user_message: str) -> str:
         _history[user_id].append({"role": "assistant", "content": reply})
         return reply
 
-    messages = [{"role": "system", "content": _system_prompt(memories)}] + _history[user_id]
+    messages = [{"role": "system", "content": _system_prompt(memories, personality_name)}] + _history[user_id]
 
     MAX_ITERATIONS = 8
     _reminder_fallback_tried = False
@@ -1224,7 +1380,7 @@ async def chat(user_id: int, user_message: str) -> str:
                         fallback_result = await handle_tool_call(
                             "reminder_create", {"message": parsed_msg, "fire_at": fire_at_str}, user_id
                         )
-                        quip = await _personality_quip(fallback_result, "this reminder that was just set")
+                        quip = await _personality_quip(fallback_result, "this reminder that was just set", user_id)
                         reply = quip if quip else fallback_result
                         _history[user_id].append({"role": "assistant", "content": reply})
                         return reply
@@ -1314,7 +1470,7 @@ async def chat(user_id: int, user_message: str) -> str:
                 return result
 
             if _resolved_name == "anylist_get_meal_plan" and len(tool_calls) == 1:
-                quip = await _personality_quip(result)
+                quip = await _personality_quip(result, user_id=user_id)
                 reply = result + ("\n\n" + quip if quip else "")
                 _history[user_id].append({"role": "assistant", "content": reply})
                 return reply
