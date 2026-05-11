@@ -30,7 +30,7 @@ async def get_states(domains: list[str] | None = None) -> list[dict]:
     if domains:
         requested = {d for d in domains if isinstance(d, str) and _HA_NAME_RE.fullmatch(d)}
         allowed = allowed & requested
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=Config.INTEGRATION_TIMEOUT_SECONDS) as client:
         resp = await client.get(f"{_base()}/api/states", headers=_headers())
         resp.raise_for_status()
     results = []
@@ -66,7 +66,7 @@ async def call_service(domain: str, service: str, entity_id: str, extra: dict | 
     payload = {"entity_id": entity_id}
     if extra:
         payload.update(extra)
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=Config.INTEGRATION_TIMEOUT_SECONDS) as client:
         resp = await client.post(
             f"{_base()}/api/services/{domain}/{service}",
             headers=_headers(),
@@ -81,7 +81,7 @@ async def get_entity_state(entity_id: str) -> dict:
         raise RuntimeError("Home Assistant is not configured.")
     if not _HA_ENTITY_ID_RE.fullmatch(entity_id):
         raise ValueError("Invalid Home Assistant entity_id.")
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=Config.INTEGRATION_TIMEOUT_SECONDS) as client:
         resp = await client.get(f"{_base()}/api/states/{entity_id}", headers=_headers())
         resp.raise_for_status()
         data = resp.json()
@@ -98,7 +98,7 @@ async def get_weather() -> dict:
         raise RuntimeError("Home Assistant is not configured.")
     if not Config.HA_WEATHER_ENTITY:
         raise RuntimeError("HA_WEATHER_ENTITY is not configured.")
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=Config.INTEGRATION_TIMEOUT_SECONDS) as client:
         resp = await client.get(
             f"{_base()}/api/states/{Config.HA_WEATHER_ENTITY}",
             headers=_headers(),

@@ -18,10 +18,26 @@ _scheduler: AsyncIOScheduler | None = None
 
 # user_id -> reminder_id of the most recently fired reminder (in-memory, lost on restart)
 _last_fired: dict[int, int] = {}
+_LAST_FIRED_SETTING_KEY = "last_fired_reminder_id"
 
 
-def get_last_fired_reminder_id(user_id: int) -> int | None:
-    return _last_fired.get(user_id)
+async def get_last_fired_reminder_id_persistent(user_id: int) -> int | None:
+    if user_id in _last_fired:
+        return _last_fired[user_id]
+    saved = await db.get_user_setting(user_id, _LAST_FIRED_SETTING_KEY)
+    if not saved:
+        return None
+    try:
+        reminder_id = int(saved)
+    except ValueError:
+        return None
+    _last_fired[user_id] = reminder_id
+    return reminder_id
+
+
+async def _set_last_fired_reminder(user_id: int, reminder_id: int) -> None:
+    _last_fired[user_id] = reminder_id
+    await db.save_user_setting(user_id, _LAST_FIRED_SETTING_KEY, str(reminder_id))
 
 
 def set_bot(bot):
@@ -66,7 +82,7 @@ async def _fire_reminder(reminder_id: int, user_id: int, message: str, original_
 
 
 async def _one_shot_job(reminder_id: int, user_id: int, message: str, original_time: str, late: bool = False, smart: bool = False):
-    _last_fired[user_id] = reminder_id
+    await _set_last_fired_reminder(user_id, reminder_id)
     if smart:
         await _run_smart_reminder(reminder_id, user_id, message)
     else:
@@ -75,7 +91,7 @@ async def _one_shot_job(reminder_id: int, user_id: int, message: str, original_t
 
 
 async def _recurring_job(reminder_id: int, user_id: int, message: str, fire_at: str, smart: bool = False):
-    _last_fired[user_id] = reminder_id
+    await _set_last_fired_reminder(user_id, reminder_id)
     if smart:
         await _run_smart_reminder(reminder_id, user_id, message)
     else:

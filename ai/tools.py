@@ -834,7 +834,7 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
 
             case "reminder_snooze":
                 from datetime import timedelta
-                duration_str = args.get("duration", "").strip()
+                duration_str = str(args.get("duration", "")).strip()
                 reminder_id = args.get("reminder_id")
 
                 # No duration — ask the user
@@ -847,7 +847,7 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
 
                 # Resolve which reminder to snooze
                 if not reminder_id:
-                    reminder_id = sched.get_last_fired_reminder_id(user_id)
+                    reminder_id = await sched.get_last_fired_reminder_id_persistent(user_id)
                 if not reminder_id:
                     return "I'm not sure which reminder to snooze. Please say 'snooze reminder <id> for <duration>'."
 

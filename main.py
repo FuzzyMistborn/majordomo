@@ -2,8 +2,10 @@
 Main entry point for the Ollama Telegram bot.
 """
 
+import html
 import logging
-import os
+import re
+from pathlib import Path
 
 from telegram import Update
 from telegram.constants import ChatAction
@@ -32,6 +34,23 @@ logging.getLogger("apscheduler").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
+def _render_markdownish_as_html(reply: str) -> str:
+    reply = html.escape(reply)
+    reply = re.sub(r"\*\*([^*]+?)\*\*", r"<b>\1</b>", reply)
+    reply = re.sub(r"\*([^*]+?)\*", r"\1", reply)
+    reply = re.sub(r"_([^_]+?)_", r"\1", reply)
+    reply = re.sub(r"`([^`]+?)`", r"\1", reply)
+    return reply
+
+
+async def _send_reply(update: Update, reply: str):
+    if not reply or not reply.strip():
+        reply = "I processed your request but had nothing to say. Please try again."
+    reply = _render_markdownish_as_html(reply)
+    for i in range(0, max(len(reply), 1), 4096):
+        await update.message.reply_text(reply[i:i + 4096], parse_mode="HTML")
+
+
 # ── Auth middleware ───────────────────────────────────────────────────────────
 
 def _is_allowed(user_id: int) -> bool:
@@ -52,17 +71,16 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _reject(update)
         return
     await update.message.reply_text(
-        "Ah. You've found me.\n\n"
-        "I am Wit — and before you ask, yes, I do find this line of work somewhat beneath my abilities. "
-        "And yet, here we are.\n\n"
+        "Majordomo is ready.\n\n"
         "I can help with:\n"
-        "• 📋 To-do lists _(I won't judge the contents. Much.)_\n"
-        "• ⏰ Reminders _(one-off and recurring, like certain mistakes)_\n"
+        "• 📋 To-do lists\n"
+        "• ⏰ Reminders, including recurring and smart reminders\n"
         "• 🔍 Web search\n"
         "• 🏠 Home Assistant control\n"
-        "• 📅 Calendar events\n\n"
-        "Just talk to me naturally. Use /help if you need guidance, though I'd have thought the above was self-explanatory.",
-        parse_mode="Markdown"
+        "• 📅 Calendar events\n"
+        "• 🛒 AnyList shopping lists and meal plans\n"
+        "• 🎭 Switchable personalities\n\n"
+        "Send a natural-language request, or use /help for examples.",
     )
 
 
@@ -71,11 +89,16 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _reject(update)
         return
     await update.message.reply_text(
-        "*Commands, since apparently you need them:*\n\n"
-        "/start — My introduction. Quite good, honestly.\n"
-        "/help — This. You're looking at it.\n"
-        "/clear — Make me forget our conversation. I'll pretend to be hurt.\n\n"
-        "*Or just talk to me. Examples:*\n"
+        "*Commands:*\n\n"
+        "/start — Show a short overview.\n"
+        "/help — Show usage examples.\n"
+        "/clear — Clear your conversation history.\n\n"
+        "/personality — Show current personality.\n"
+        "/personality list — Show available personalities.\n"
+        "/personality set plain — Switch personality.\n"
+        "/reminders — List active reminders.\n"
+        "/lists — List internal to-do lists and AnyList lists.\n\n"
+        "*Examples:*\n"
         "• _\"Remind me to call mom tomorrow at 3pm\"_\n"
         "• _\"Add milk to my shopping list\"_\n"
         "• _\"What's on my calendar this week?\"_\n"
@@ -96,6 +119,42 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Done. I've forgotten everything. It's surprisingly easy.")
 
 
+async def cmd_personality(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        await _reject(update)
+        return
+    try:
+        reply = await agent.personality_command(update.effective_user.id, context.args)
+    except Exception:
+        logger.exception("Error in /personality")
+        reply = "Something went wrong. Please try again."
+    await _send_reply(update, reply)
+
+
+async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        await _reject(update)
+        return
+    try:
+        reply = await agent.reminders_command(update.effective_user.id)
+    except Exception:
+        logger.exception("Error in /reminders")
+        reply = "Something went wrong. Please try again."
+    await _send_reply(update, reply)
+
+
+async def cmd_lists(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        await _reject(update)
+        return
+    try:
+        reply = await agent.lists_command(update.effective_user.id)
+    except Exception:
+        logger.exception("Error in /lists")
+        reply = "Something went wrong. Please try again."
+    await _send_reply(update, reply)
+
+
 # ── Message handler ───────────────────────────────────────────────────────────
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -107,30 +166,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text.strip()
     if not user_text:
         return
+    if len(user_text) > Config.MAX_USER_MESSAGE_CHARS:
+        await update.message.reply_text(
+            f"Message is too long. Maximum is {Config.MAX_USER_MESSAGE_CHARS} characters."
+        )
+        return
 
     # Show typing indicator while processing
     await context.bot.send_chat_action(
         chat_id=update.effective_chat.id, action=ChatAction.TYPING
     )
 
-    reply = await agent.chat(user_id, user_text)
+    try:
+        reply = await agent.chat(user_id, user_text)
+    except Exception:
+        logger.exception("Unhandled error in agent.chat()")
+        reply = "Something went wrong. Please try again."
 
-    # Guard against empty reply
-    if not reply or not reply.strip():
-        reply = "I processed your request but had nothing to say. Please try again."
-
-    # Render as HTML: escape special chars, convert **bold** to <b>bold</b>,
-    # strip remaining model-added markdown artifacts.
-    import re, html as _html
-    reply = _html.escape(reply)
-    reply = re.sub(r"\*\*([^*]+?)\*\*", r"<b>\1</b>", reply)
-    reply = re.sub(r"\*([^*]+?)\*", r"\1", reply)
-    reply = re.sub(r"_([^_]+?)_", r"\1", reply)
-    reply = re.sub(r"`([^`]+?)`", r"\1", reply)
-
-    # Telegram messages have a 4096 char limit
-    for i in range(0, max(len(reply), 1), 4096):
-        await update.message.reply_text(reply[i:i + 4096], parse_mode="HTML")
+    await _send_reply(update, reply)
 
 
 
@@ -153,10 +206,15 @@ async def post_init(application: Application):
     logger.info("Scheduler ready.")
 
 
+def validate_startup():
+    Config.validate()
+    personality_dir = Path("personalities")
+    if not personality_dir.exists():
+        logger.warning("personalities/ directory not found; legacy personality.md fallback may be used.")
+
 
 def main():
-    if not Config.TELEGRAM_TOKEN:
-        raise RuntimeError("TELEGRAM_TOKEN environment variable is not set.")
+    validate_startup()
 
     app = (
         Application.builder()
@@ -168,6 +226,9 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("clear", cmd_clear))
+    app.add_handler(CommandHandler("personality", cmd_personality))
+    app.add_handler(CommandHandler("reminders", cmd_reminders))
+    app.add_handler(CommandHandler("lists", cmd_lists))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 

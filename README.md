@@ -85,9 +85,14 @@ Just send natural language messages. Examples:
 
 ### Commands
 
-- `/start` — introduction
+- `/start` — show a short overview
 - `/help` — usage examples
-- `/clear` — clear conversation history (bot forgets context)
+- `/clear` — clear conversation history
+- `/personality` — show your current personality
+- `/personality list` — list available personalities
+- `/personality set plain` — switch your personality
+- `/reminders` — list active reminders
+- `/lists` — list internal to-do lists and AnyList lists
 
 ---
 
@@ -162,6 +167,7 @@ Saved facts are injected into every prompt so the bot applies them automatically
 | `CALDAV_CALENDARS` | — | _(all)_ | Comma-separated calendar display names to sync |
 | `TIMEZONE` | — | `UTC` | IANA timezone for reminders (e.g. `America/New_York`) |
 | `HISTORY_WINDOW` | — | `20` | Conversation messages to retain per user |
+| `INTEGRATION_TIMEOUT_SECONDS` | — | `20` | Timeout for external integrations |
 | `DB_PATH` | — | `/data/bot.db` | SQLite database path inside the container |
 
 ---

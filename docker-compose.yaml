@@ -18,11 +18,23 @@ services:
       - HA_URL=${HA_URL:-}
       - HA_TOKEN=${HA_TOKEN:-}
       - HA_ALLOWED_DOMAINS=${HA_ALLOWED_DOMAINS:-light,switch,input_boolean,script,automation,climate,cover,fan,media_player}
-      - HA_CALENDARS=${HA_CALENDARS:-}
+      - HA_WEATHER_ENTITY=${HA_WEATHER_ENTITY:-}
+
+      # ── CalDAV (optional) ─────────────────────────────────────────────────
+      - CALDAV_URL=${CALDAV_URL:-}
+      - CALDAV_USERNAME=${CALDAV_USERNAME:-}
+      - CALDAV_PASSWORD=${CALDAV_PASSWORD:-}
+      - CALDAV_CALENDARS=${CALDAV_CALENDARS:-}
+
+      # ── AnyList (optional) ────────────────────────────────────────────────
+      - ANYLIST_EMAIL=${ANYLIST_EMAIL:-}
+      - ANYLIST_PASSWORD=${ANYLIST_PASSWORD:-}
+      - ANYLIST_ICAL_URL=${ANYLIST_ICAL_URL:-}
 
       # ── Bot settings ──────────────────────────────────────────────────────
       - TIMEZONE=${TIMEZONE:-UTC}
       - HISTORY_WINDOW=${HISTORY_WINDOW:-20}
+      - INTEGRATION_TIMEOUT_SECONDS=${INTEGRATION_TIMEOUT_SECONDS:-20}
       - DB_PATH=/data/bot.db
 
     # Needed so host.docker.internal resolves to the host (for Ollama)

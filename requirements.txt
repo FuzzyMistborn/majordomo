@@ -5,5 +5,5 @@ apscheduler==3.11.2
 httpx==0.28.1
 python-dotenv==1.2.2
 tavily-python==0.7.24
-caldav
-pyanylist
+caldav==3.2.0
+pyanylist==0.0.6

@@ -131,7 +131,7 @@ def _fetch_meal_plan_sync(start_str: str, end_str: str) -> list[dict]:
 
     logger.info("Fetching AnyList iCal feed.")
     import httpx
-    with httpx.Client(follow_redirects=True, timeout=15) as http:
+    with httpx.Client(follow_redirects=True, timeout=Config.INTEGRATION_TIMEOUT_SECONDS) as http:
         resp = http.get(url)
         if resp.status_code in (403, 404):
             raise ValueError(
@@ -172,18 +172,27 @@ async def get_lists() -> list[dict]:
     if not _enabled():
         raise RuntimeError("AnyList is not configured.")
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _fetch_lists_sync)
+    return await asyncio.wait_for(
+        loop.run_in_executor(None, _fetch_lists_sync),
+        timeout=Config.INTEGRATION_TIMEOUT_SECONDS,
+    )
 
 
 async def get_list_items(list_name: str, include_checked: bool = False) -> list[dict]:
     if not _enabled():
         raise RuntimeError("AnyList is not configured.")
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _fetch_list_items_sync, list_name, include_checked)
+    return await asyncio.wait_for(
+        loop.run_in_executor(None, _fetch_list_items_sync, list_name, include_checked),
+        timeout=Config.INTEGRATION_TIMEOUT_SECONDS,
+    )
 
 
 async def get_meal_plan(start: str, end: str) -> list[dict]:
     if not _enabled():
         raise RuntimeError("AnyList is not configured.")
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _fetch_meal_plan_sync, start, end)
+    return await asyncio.wait_for(
+        loop.run_in_executor(None, _fetch_meal_plan_sync, start, end),
+        timeout=Config.INTEGRATION_TIMEOUT_SECONDS,
+    )

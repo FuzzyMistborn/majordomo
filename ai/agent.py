@@ -6,7 +6,6 @@ import json
 import os
 import logging
 import re
-import ast
 from collections import defaultdict
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -29,6 +28,23 @@ _KNOWN_TOOLS: frozenset[str] = frozenset(
 _personality_cache: dict[str, str] = {}
 _PERSONALITY_SETTING_KEY = "personality"
 _DEFAULT_PERSONALITY = "wit"
+_PERSONALITY_LIST_RE = re.compile(
+    r"\b(?:list|show)\b.{0,40}\bpersonalit(?:y|ies)\b|"
+    r"\b(?:what|which)\s+personalit(?:y|ies)\s+(?:are\s+)?(?:available|configured|installed)\b",
+    re.IGNORECASE,
+)
+_PERSONALITY_CURRENT_RE = re.compile(
+    r"\b(?:current|active)\s+personalit(?:y|ies)\b|"
+    r"\bwhat\s+personalit(?:y|ies)\s+(?:are\s+you|am\s+i)\s+using\b",
+    re.IGNORECASE,
+)
+_PERSONALITY_SWITCH_RE = re.compile(
+    r"\b(?:switch|change|set|use)\s+(?:my\s+|the\s+|your\s+)?personality\s+"
+    r"(?:to|as)?\s*[\"']?([A-Za-z0-9_-]{2,40})[\"']?\s*$|"
+    r"\b(?:switch|change|set|use)\s+(?:to\s+)?[\"']?([A-Za-z0-9_-]{2,40})[\"']?\s+personality\s*$|"
+    r"\b(?:be|act\s+as)\s+[\"']?([A-Za-z0-9_-]{2,40})[\"']?\s+personality\s*$",
+    re.IGNORECASE,
+)
 
 
 def _personality_dirs() -> list[str]:
@@ -454,6 +470,53 @@ def clear_history(user_id: int):
     _history[user_id] = []
 
 
+async def personality_command(user_id: int, args: list[str]) -> str:
+    current = await _get_user_personality_name(user_id)
+    if not args or args[0].lower() in {"current", "show"}:
+        return f"Current personality: {current or 'none'}."
+
+    action = args[0].lower()
+    if action in {"list", "ls"}:
+        return _format_personality_list(current)
+
+    if action in {"set", "use", "switch"}:
+        if len(args) < 2:
+            return "Usage: /personality set <name>"
+        requested = args[1]
+    else:
+        requested = args[0]
+
+    resolved = _resolve_personality_name(requested)
+    if not resolved:
+        return f"No personality named '{requested}' found.\n\n{_format_personality_list(current)}"
+
+    await db.save_user_setting(user_id, _PERSONALITY_SETTING_KEY, resolved)
+    clear_history(user_id)
+    return f"Personality switched to {resolved}."
+
+
+async def reminders_command(user_id: int) -> str:
+    return await handle_tool_call("reminder_list", {}, user_id)
+
+
+async def lists_command(user_id: int) -> str:
+    lines: list[str] = []
+    todo_lists = await db.get_todo_lists(user_id)
+    if todo_lists:
+        lines.append("To-do lists:")
+        lines.extend(f"- {item['name']}" for item in todo_lists)
+    else:
+        lines.append("No internal to-do lists found.")
+
+    if Config.ANYLIST_EMAIL and Config.ANYLIST_PASSWORD:
+        anylist_result = await handle_tool_call("anylist_get_list", {}, user_id)
+        if not anylist_result.startswith("Tool error:"):
+            lines.append("")
+            lines.append(anylist_result)
+
+    return "\n".join(lines)
+
+
 # Matches: "remember/note that <KEY> is [called] <VALUE>"
 _MEMORY_RE = re.compile(
     r'(?:remember|note|save|store)\s+(?:that\s+)?["\']?(.+?)["\']?\s+'
@@ -865,23 +928,6 @@ async def chat(user_id: int, user_message: str) -> str:
     personality_name = await _get_user_personality_name(user_id)
 
     # Personality management is deterministic bot configuration, not model memory.
-    _PERSONALITY_LIST_RE = re.compile(
-        r"\b(?:list|show)\b.{0,40}\bpersonalit(?:y|ies)\b|"
-        r"\b(?:what|which)\s+personalit(?:y|ies)\s+(?:are\s+)?(?:available|configured|installed)\b",
-        re.IGNORECASE,
-    )
-    _PERSONALITY_CURRENT_RE = re.compile(
-        r"\b(?:current|active)\s+personalit(?:y|ies)\b|"
-        r"\bwhat\s+personalit(?:y|ies)\s+(?:are\s+you|am\s+i)\s+using\b",
-        re.IGNORECASE,
-    )
-    _PERSONALITY_SWITCH_RE = re.compile(
-        r"\b(?:switch|change|set|use)\s+(?:my\s+|the\s+|your\s+)?personality\s+"
-        r"(?:to|as)?\s*[\"']?([A-Za-z0-9_-]{2,40})[\"']?\s*$|"
-        r"\b(?:switch|change|set|use)\s+(?:to\s+)?[\"']?([A-Za-z0-9_-]{2,40})[\"']?\s+personality\s*$|"
-        r"\b(?:be|act\s+as)\s+[\"']?([A-Za-z0-9_-]{2,40})[\"']?\s+personality\s*$",
-        re.IGNORECASE,
-    )
     if _PERSONALITY_LIST_RE.search(user_message):
         reply = _format_personality_list(personality_name)
         _history[user_id].append({"role": "assistant", "content": reply})
@@ -1002,7 +1048,7 @@ async def chat(user_id: int, user_message: str) -> str:
         )
         if _dur_match:
             _duration_str = _dur_match.group(1).strip()
-            _last_id = sched.get_last_fired_reminder_id(user_id)
+            _last_id = await sched.get_last_fired_reminder_id_persistent(user_id)
             if _last_id:
                 logger.info(f"Pre-model snooze intercept: id={_last_id}, duration={_duration_str!r}")
                 result = await handle_tool_call("reminder_snooze", {"duration": _duration_str, "reminder_id": _last_id}, user_id)

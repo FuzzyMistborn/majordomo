@@ -1,16 +1,44 @@
 import os
+from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+
+def _parse_allowed_user_ids(raw: str) -> tuple[list[int], list[str]]:
+    user_ids: list[int] = []
+    invalid: list[str] = []
+    for uid in raw.split(","):
+        uid = uid.strip()
+        if not uid:
+            continue
+        try:
+            user_ids.append(int(uid))
+        except ValueError:
+            invalid.append(uid)
+    return user_ids, invalid
+
+
+_INVALID_INT_SETTINGS: list[str] = []
+
+
+def _parse_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        _INVALID_INT_SETTINGS.append(name)
+        return default
 
 class Config:
     # Telegram
-    TELEGRAM_TOKEN: str = os.environ["TELEGRAM_TOKEN"]
-    ALLOWED_USER_IDS: list[int] = [
-        int(uid.strip())
-        for uid in os.environ.get("ALLOWED_USER_IDS", "").split(",")
-        if uid.strip()
-    ]
+    TELEGRAM_TOKEN: str = os.environ.get("TELEGRAM_TOKEN", "")
+    ALLOWED_USER_IDS, INVALID_ALLOWED_USER_IDS = _parse_allowed_user_ids(
+        os.environ.get("ALLOWED_USER_IDS", "")
+    )
 
     # Tavily
-    TAVILY_API_KEY: str = os.environ["TAVILY_API_KEY"]
+    TAVILY_API_KEY: str = os.environ.get("TAVILY_API_KEY", "")
 
     # Ollama
     OLLAMA_HOST: str = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
@@ -49,4 +77,79 @@ class Config:
     TIMEZONE: str = os.environ.get("TIMEZONE", "UTC")
 
     # Conversation history window
-    HISTORY_WINDOW: int = int(os.environ.get("HISTORY_WINDOW", "20"))
+    HISTORY_WINDOW: int = _parse_int_env("HISTORY_WINDOW", 20)
+
+    # Bounds
+    MAX_USER_MESSAGE_CHARS: int = _parse_int_env("MAX_USER_MESSAGE_CHARS", 4000)
+    MAX_LIST_NAME_CHARS: int = _parse_int_env("MAX_LIST_NAME_CHARS", 80)
+    MAX_TODO_ITEM_CHARS: int = _parse_int_env("MAX_TODO_ITEM_CHARS", 2000)
+    MAX_REMINDER_MESSAGE_CHARS: int = _parse_int_env("MAX_REMINDER_MESSAGE_CHARS", 1000)
+    MAX_MEMORY_KEY_CHARS: int = _parse_int_env("MAX_MEMORY_KEY_CHARS", 80)
+    MAX_MEMORY_VALUE_CHARS: int = _parse_int_env("MAX_MEMORY_VALUE_CHARS", 2000)
+    MAX_SEARCH_QUERY_CHARS: int = _parse_int_env("MAX_SEARCH_QUERY_CHARS", 500)
+    MAX_NOTE_TITLE_CHARS: int = _parse_int_env("MAX_NOTE_TITLE_CHARS", 200)
+    MAX_NOTE_CONTENT_CHARS: int = _parse_int_env("MAX_NOTE_CONTENT_CHARS", 10000)
+    MAX_SETTING_KEY_CHARS: int = _parse_int_env("MAX_SETTING_KEY_CHARS", 80)
+    MAX_SETTING_VALUE_CHARS: int = _parse_int_env("MAX_SETTING_VALUE_CHARS", 2000)
+
+    # Integration timeout for sync libraries wrapped in executors.
+    INTEGRATION_TIMEOUT_SECONDS: int = _parse_int_env("INTEGRATION_TIMEOUT_SECONDS", 20)
+
+    @classmethod
+    def validate(cls) -> None:
+        errors: list[str] = []
+        if not cls.TELEGRAM_TOKEN:
+            errors.append("TELEGRAM_TOKEN is required.")
+        if not cls.ALLOWED_USER_IDS:
+            errors.append("ALLOWED_USER_IDS must contain at least one Telegram user ID.")
+        if cls.INVALID_ALLOWED_USER_IDS:
+            errors.append(
+                "ALLOWED_USER_IDS contains invalid values: "
+                + ", ".join(cls.INVALID_ALLOWED_USER_IDS)
+            )
+        if not cls.TAVILY_API_KEY:
+            errors.append("TAVILY_API_KEY is required.")
+        if _INVALID_INT_SETTINGS:
+            errors.append("Invalid integer environment values: " + ", ".join(_INVALID_INT_SETTINGS))
+        try:
+            ZoneInfo(cls.TIMEZONE)
+        except ZoneInfoNotFoundError:
+            errors.append(f"TIMEZONE is not a valid IANA timezone: {cls.TIMEZONE}")
+        db_parent = Path(cls.DB_PATH).expanduser().parent
+        if not db_parent.exists():
+            errors.append(f"DB_PATH parent directory does not exist: {db_parent}")
+        elif not os.access(db_parent, os.W_OK):
+            errors.append(f"DB_PATH parent directory is not writable: {db_parent}")
+        if cls.HA_URL and not cls.HA_TOKEN:
+            errors.append("HA_TOKEN is required when HA_URL is set.")
+        if cls.HA_TOKEN and not cls.HA_URL:
+            errors.append("HA_URL is required when HA_TOKEN is set.")
+        caldav_any = bool(cls.CALDAV_URL or cls.CALDAV_USERNAME or cls.CALDAV_PASSWORD)
+        caldav_all = bool(cls.CALDAV_URL and cls.CALDAV_USERNAME and cls.CALDAV_PASSWORD)
+        if caldav_any and not caldav_all:
+            errors.append("CALDAV_URL, CALDAV_USERNAME, and CALDAV_PASSWORD must be set together.")
+        anylist_any = bool(cls.ANYLIST_EMAIL or cls.ANYLIST_PASSWORD)
+        anylist_all = bool(cls.ANYLIST_EMAIL and cls.ANYLIST_PASSWORD)
+        if anylist_any and not anylist_all:
+            errors.append("ANYLIST_EMAIL and ANYLIST_PASSWORD must be set together.")
+        if cls.INTEGRATION_TIMEOUT_SECONDS <= 0:
+            errors.append("INTEGRATION_TIMEOUT_SECONDS must be greater than zero.")
+        positive_limits = {
+            "HISTORY_WINDOW": cls.HISTORY_WINDOW,
+            "MAX_USER_MESSAGE_CHARS": cls.MAX_USER_MESSAGE_CHARS,
+            "MAX_LIST_NAME_CHARS": cls.MAX_LIST_NAME_CHARS,
+            "MAX_TODO_ITEM_CHARS": cls.MAX_TODO_ITEM_CHARS,
+            "MAX_REMINDER_MESSAGE_CHARS": cls.MAX_REMINDER_MESSAGE_CHARS,
+            "MAX_MEMORY_KEY_CHARS": cls.MAX_MEMORY_KEY_CHARS,
+            "MAX_MEMORY_VALUE_CHARS": cls.MAX_MEMORY_VALUE_CHARS,
+            "MAX_SEARCH_QUERY_CHARS": cls.MAX_SEARCH_QUERY_CHARS,
+            "MAX_NOTE_TITLE_CHARS": cls.MAX_NOTE_TITLE_CHARS,
+            "MAX_NOTE_CONTENT_CHARS": cls.MAX_NOTE_CONTENT_CHARS,
+            "MAX_SETTING_KEY_CHARS": cls.MAX_SETTING_KEY_CHARS,
+            "MAX_SETTING_VALUE_CHARS": cls.MAX_SETTING_VALUE_CHARS,
+        }
+        invalid_limits = [name for name, value in positive_limits.items() if value <= 0]
+        if invalid_limits:
+            errors.append("These numeric settings must be greater than zero: " + ", ".join(invalid_limits))
+        if errors:
+            raise RuntimeError("Invalid configuration:\n- " + "\n- ".join(errors))

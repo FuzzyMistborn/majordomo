@@ -188,21 +188,30 @@ async def get_calendar_events(start: str, end: str) -> list[dict]:
     if not _enabled():
         raise RuntimeError("CalDAV is not configured.")
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _fetch_events_sync, start, end)
+    return await asyncio.wait_for(
+        loop.run_in_executor(None, _fetch_events_sync, start, end),
+        timeout=Config.INTEGRATION_TIMEOUT_SECONDS,
+    )
 
 
 async def create_calendar_event(summary: str, start: str, end: str | None = None, description: str = "", location: str = "", calendar_name: str | None = None) -> str:
     if not _enabled():
         raise RuntimeError("CalDAV is not configured.")
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _create_event_sync, summary, start, end, description, location, calendar_name)
+    return await asyncio.wait_for(
+        loop.run_in_executor(None, _create_event_sync, summary, start, end, description, location, calendar_name),
+        timeout=Config.INTEGRATION_TIMEOUT_SECONDS,
+    )
 
 
 async def delete_calendar_event(summary: str, start: str, calendar_name: str | None = None) -> str:
     if not _enabled():
         raise RuntimeError("CalDAV is not configured.")
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _delete_event_sync, summary, start, calendar_name)
+    return await asyncio.wait_for(
+        loop.run_in_executor(None, _delete_event_sync, summary, start, calendar_name),
+        timeout=Config.INTEGRATION_TIMEOUT_SECONDS,
+    )
 
 
 async def update_calendar_event(summary: str, start: str, calendar_name: str | None = None,
@@ -212,7 +221,10 @@ async def update_calendar_event(summary: str, start: str, calendar_name: str | N
     if not _enabled():
         raise RuntimeError("CalDAV is not configured.")
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(
-        None, _update_event_sync, summary, start, calendar_name,
-        new_summary, new_start, new_end, new_description, new_location,
+    return await asyncio.wait_for(
+        loop.run_in_executor(
+            None, _update_event_sync, summary, start, calendar_name,
+            new_summary, new_start, new_end, new_description, new_location,
+        ),
+        timeout=Config.INTEGRATION_TIMEOUT_SECONDS,
     )

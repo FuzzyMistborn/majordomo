@@ -1,3 +1,5 @@
+import asyncio
+
 from tavily import AsyncTavilyClient
 from config import Config
 
@@ -8,8 +10,16 @@ async def search(query: str, limit: int = 5) -> dict:
       - results: list of {title, url, snippet}
       - query: the original query
     """
+    query = query.strip()
+    if not query:
+        raise ValueError("Search query cannot be empty.")
+    if len(query) > Config.MAX_SEARCH_QUERY_CHARS:
+        raise ValueError(f"Search query is too long (max {Config.MAX_SEARCH_QUERY_CHARS} characters).")
     client = AsyncTavilyClient(api_key=Config.TAVILY_API_KEY)
-    response = await client.search(query, max_results=limit)
+    response = await asyncio.wait_for(
+        client.search(query, max_results=limit),
+        timeout=Config.INTEGRATION_TIMEOUT_SECONDS,
+    )
 
     results = [
         {
