@@ -1,6 +1,6 @@
 # Majordomo
 
-A self-hosted Telegram bot powered by Ollama. Manages to-do lists, reminders, web search, and Home Assistant control — all via natural language. Runs entirely on your own infrastructure; nothing leaves your network except Telegram API calls and Tavily search queries.
+A self-hosted Telegram bot powered by llama.cpp. Manages to-do lists, reminders, web search, and Home Assistant control — all via natural language. Runs entirely on your own infrastructure; nothing leaves your network except Telegram API calls and Tavily search queries.
 
 The bot has a personality: it responds as **Wit** (Hoid), an ancient, sardonic figure who finds the work beneath him but does it anyway, with style.
 
@@ -24,7 +24,7 @@ The bot has a personality: it responds as **Wit** (Hoid), an ancient, sardonic f
 ## Requirements
 
 - Docker + Docker Compose
-- [Ollama](https://ollama.ai) running somewhere accessible with a tool-capable model pulled
+- A [llama.cpp](https://github.com/ggml-org/llama.cpp) server running somewhere accessible with a tool-capable model loaded
 - A Telegram bot token (from [@BotFather](https://t.me/BotFather))
 - A [Tavily API key](https://app.tavily.com) (free tier: 1 000 queries/month)
 
@@ -32,13 +32,13 @@ The bot has a personality: it responds as **Wit** (Hoid), an ancient, sardonic f
 
 ## Setup
 
-### 1. Pull a model in Ollama
+### 1. Start llama.cpp with a tool-capable model
+
+The model must support tool/function calling. Start the server with the OpenAI-compatible endpoint:
 
 ```bash
-ollama pull gemma3:4b
+llama-server --model gemma-4-e4b.gguf --port 8080
 ```
-
-The model must support tool/function calling. Confirmed working: `gemma3:4b`, `llama3.1`, `llama3.2`, `qwen2.5`, `mistral-nemo`.
 
 ### 2. Configure environment
 
@@ -152,8 +152,8 @@ Saved facts are injected into every prompt so the bot applies them automatically
 | `TELEGRAM_TOKEN` | ✅ | — | Telegram bot token (from @BotFather) |
 | `ALLOWED_USER_IDS` | ✅ | — | Comma-separated Telegram user IDs |
 | `TAVILY_API_KEY` | ✅ | — | Tavily Search API key |
-| `OLLAMA_HOST` | — | `http://host.docker.internal:11434` | Ollama instance URL |
-| `OLLAMA_MODEL` | — | `gemma3:4b` | Model name (must support tool calling) |
+| `LLAMACPP_HOST` | — | `http://192.168.50.25:8080/v1/` | llama.cpp server base URL (must include `/v1/`) |
+| `LLAMACPP_MODEL` | — | `gemma-4-e4b` | Model name passed to llama.cpp |
 | `HA_URL` | — | _(disabled)_ | Home Assistant base URL |
 | `HA_TOKEN` | — | _(disabled)_ | HA long-lived access token |
 | `HA_ALLOWED_DOMAINS` | — | `light,switch,...` | HA domains the bot may control |
@@ -200,12 +200,11 @@ The selected personality is stored per Telegram user and can be changed on the f
 ## Troubleshooting
 
 **Bot doesn't respond to tool calls / acts confused**
-- Ensure your Ollama model supports tool calling. Not all models do.
-- Try `llama3.1:8b` or `qwen2.5:7b` if `gemma3:4b` is unreliable.
+- Ensure your llama.cpp model supports tool/function calling.
+- Verify the server is reachable: `curl http://192.168.50.25:8080/v1/models`
 
 **"Sorry, I couldn't reach the AI model"**
-- Verify Ollama is running: `ollama list`
-- Check `OLLAMA_HOST` — from inside Docker, use `http://host.docker.internal:11434`
+- Verify the llama.cpp server is running and the `LLAMACPP_HOST` URL is correct (must end with `/v1/`)
 
 **Reminders not firing**
 - Check the container timezone matches `TIMEZONE`

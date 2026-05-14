@@ -1,5 +1,5 @@
 """
-Main entry point for the Ollama Telegram bot.
+Main entry point for the Majordomo Telegram bot.
 """
 
 import html

@@ -1,5 +1,5 @@
 """
-Tool definitions and handlers for the Ollama AI agent.
+Tool definitions and handlers for the AI agent.
 """
 
 import json

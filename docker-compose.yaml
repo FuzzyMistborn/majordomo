@@ -1,7 +1,7 @@
 services:
   telegram-bot:
     build: .
-    container_name: ollama-telegram-bot
+    container_name: majordomo-bot
     restart: unless-stopped
     volumes:
       - bot_data:/data
@@ -10,9 +10,9 @@ services:
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
       - ALLOWED_USER_IDS=${ALLOWED_USER_IDS}          # comma-separated Telegram user IDs
       - TAVILY_API_KEY=${TAVILY_API_KEY}
-      # ── Ollama ────────────────────────────────────────────────────────────
-      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-gemma3:4b}
+      # ── llama.cpp ─────────────────────────────────────────────────────────
+      - LLAMACPP_HOST=${LLAMACPP_HOST:-http://host.docker.internal:8080/v1/}
+      - LLAMACPP_MODEL=${LLAMACPP_MODEL:-gemma-4-e4b}
 
       # ── Home Assistant (optional) ─────────────────────────────────────────
       - HA_URL=${HA_URL:-}
@@ -37,7 +37,6 @@ services:
       - INTEGRATION_TIMEOUT_SECONDS=${INTEGRATION_TIMEOUT_SECONDS:-20}
       - DB_PATH=/data/bot.db
 
-    # Needed so host.docker.internal resolves to the host (for Ollama)
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

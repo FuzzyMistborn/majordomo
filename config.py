@@ -40,9 +40,9 @@ class Config:
     # Tavily
     TAVILY_API_KEY: str = os.environ.get("TAVILY_API_KEY", "")
 
-    # Ollama
-    OLLAMA_HOST: str = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-    OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "gemma3:4b")
+    # llama.cpp
+    LLAMACPP_HOST: str = os.environ.get("LLAMACPP_HOST", "http://host.docker.internal:8080/v1/")
+    LLAMACPP_MODEL: str = os.environ.get("LLAMACPP_MODEL", "gemma-4-e4b")
 
     # Home Assistant
     HA_URL: str = os.environ.get("HA_URL", "")

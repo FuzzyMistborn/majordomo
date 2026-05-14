@@ -1,5 +1,5 @@
 """
-AI agent: manages per-user conversation history and drives the Ollama tool-calling loop.
+AI agent: manages per-user conversation history and drives the tool-calling loop.
 """
 
 import json
@@ -10,7 +10,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-import ollama
+from openai import AsyncOpenAI
 
 import database as db
 import scheduler as sched
@@ -143,9 +143,9 @@ async def _personality_quip(result: str, context: str = "this", user_id: int | N
     if not personality:
         return ""
     try:
-        client = ollama.AsyncClient(host=Config.OLLAMA_HOST)
-        resp = await client.chat(
-            model=Config.OLLAMA_MODEL,
+        client = AsyncOpenAI(base_url=Config.LLAMACPP_HOST, api_key="no-key")
+        resp = await client.chat.completions.create(
+            model=Config.LLAMACPP_MODEL,
             messages=[
                 {
                     "role": "system",
@@ -160,12 +160,8 @@ async def _personality_quip(result: str, context: str = "this", user_id: int | N
                     "content": f"React briefly to {context}:\n{result}",
                 },
             ],
-            tools=[],
         )
-        if isinstance(resp, dict):
-            quip = resp.get("message", {}).get("content", "").strip()
-        else:
-            quip = (resp.message.content or "").strip()
+        quip = (resp.choices[0].message.content or "").strip()
         return _strip_thinking(quip)
     except Exception:
         return ""
@@ -761,19 +757,14 @@ def _strip_text_tool_calls(content: str) -> str:
 
 def _extract_message(response) -> tuple[str, list[dict]]:
     """
-    Normalise the ollama response into (content, tool_calls).
+    Normalise the OpenAI-compatible response into (content, tool_calls).
     Handles both dict responses (current lib) and object responses (older lib).
     Also handles thinking models that return a 'thinking' field or <think> tags.
     tool_calls is a list of {"name": str, "arguments": dict, "id": str}
     """
-    if isinstance(response, dict):
-        msg = response.get("message", {})
-        content = msg.get("content") or ""
-        raw_calls = msg.get("tool_calls") or []
-    else:
-        msg = response.message
-        content = msg.content or ""
-        raw_calls = msg.tool_calls or []
+    msg = response.choices[0].message
+    content = msg.content or ""
+    raw_calls = msg.tool_calls or []
 
     # Strip <think> blocks from thinking models (Gemma4, Qwen3, etc.)
     content = _strip_thinking(content)
@@ -909,7 +900,7 @@ async def _find_todo_item_by_name(user_id: int, list_name: str, item_query: str)
 
 async def chat(user_id: int, user_message: str) -> str:
     """
-    Process a user message through the Ollama agent loop.
+    Process a user message through the agent loop.
     Returns the assistant's final reply as a string.
     """
     # Normalize Telegram smart/curly quotes → ASCII so all regex patterns match cleanly
@@ -1293,16 +1284,16 @@ async def chat(user_id: int, user_message: str) -> str:
     _reminder_fallback_tried = False
     for iteration in range(MAX_ITERATIONS):
         try:
-            logger.info(f"Sending to Ollama (iteration {iteration}, {len(messages)} messages, {len(all_tools)} tools)")
+            logger.info(f"Sending to model (iteration {iteration}, {len(messages)} messages, {len(all_tools)} tools)")
             response = await client_chat(all_tools, messages)
         except Exception as e:
-            logger.error(f"Ollama API error: {e}", exc_info=True)
-            return "Sorry, I couldn't reach the AI model. Please check that Ollama is running."
+            logger.error(f"API error: {e}", exc_info=True)
+            return "Sorry, I couldn't reach the AI model. Please check that llama.cpp is running."
 
         try:
             content, tool_calls = _extract_message(response)
         except Exception as e:
-            logger.error(f"Failed to parse Ollama response: {e}", exc_info=True)
+            logger.error(f"Failed to parse model response: {e}", exc_info=True)
             return "Sorry, I had trouble processing the response. Please try again."
 
         # Enforce dates from the grounded user message
@@ -1535,10 +1526,9 @@ async def chat(user_id: int, user_message: str) -> str:
 
 
 async def client_chat(all_tools, messages):
-    client = ollama.AsyncClient(host=Config.OLLAMA_HOST)
-    return await client.chat(
-        model=Config.OLLAMA_MODEL,
+    client = AsyncOpenAI(base_url=Config.LLAMACPP_HOST, api_key="no-key")
+    return await client.chat.completions.create(
+        model=Config.LLAMACPP_MODEL,
         messages=messages,
         tools=all_tools,
-        options={"think": False},
     )
