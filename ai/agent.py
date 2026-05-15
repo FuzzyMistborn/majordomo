@@ -898,7 +898,7 @@ async def _find_todo_item_by_name(user_id: int, list_name: str, item_query: str)
     return None, None
 
 
-async def chat(user_id: int, user_message: str) -> str:
+async def chat(user_id: int, user_message: str, smart_reminder: bool = False) -> str:
     """
     Process a user message through the agent loop.
     Returns the assistant's final reply as a string.
@@ -976,6 +976,8 @@ async def chat(user_id: int, user_message: str) -> str:
 
     # Pre-model intercepts: bypass the model entirely for queries we can always handle
     # deterministically. This prevents hallucination and prompt-injection contamination.
+    # Smart reminders skip all intercepts so the model assembles the full briefing.
+    _skip = smart_reminder
 
     # URL auto-add rule: "whenever I send a URL/link, add it to X list"
     _URL_RULE_RE = re.compile(
@@ -985,7 +987,7 @@ async def chat(user_id: int, user_message: str) -> str:
         re.IGNORECASE,
     )
     _url_rule_match = _URL_RULE_RE.search(user_message)
-    if _url_rule_match:
+    if not _skip and _url_rule_match:
         _target_list = _url_rule_match.group(1).strip().strip("\"'“”‘’")
         await db.save_memory(user_id, "url_auto_list", _target_list)
         logger.info(f"URL auto-add rule saved: list={_target_list!r}")
@@ -996,7 +998,7 @@ async def chat(user_id: int, user_message: str) -> str:
     # Reminder list
     _LIST_REMINDER_WORDS = ("what reminders", "list reminders", "show reminders",
                             "my reminders", "reminders do i have", "any reminders")
-    if any(w in user_message.lower() for w in _LIST_REMINDER_WORDS):
+    if not _skip and any(w in user_message.lower() for w in _LIST_REMINDER_WORDS):
         logger.info("Pre-model reminder list intercept")
         fallback_result = await handle_tool_call("reminder_list", {}, user_id)
         _history[user_id].append({"role": "assistant", "content": fallback_result})
@@ -1007,7 +1009,7 @@ async def chat(user_id: int, user_message: str) -> str:
         r"\b(?:delete|remove|cancel|dismiss|clear|get\s+rid\s+of)\b.{0,30}?\breminder\b",
         re.IGNORECASE,
     )
-    if _DELETE_REMINDER_RE.search(user_message):
+    if not _skip and _DELETE_REMINDER_RE.search(user_message):
         reminders = await db.get_reminders(user_id)
         if reminders:
             # If only one reminder exists, delete it directly
@@ -1032,7 +1034,7 @@ async def chat(user_id: int, user_message: str) -> str:
 
     # Reminder snooze
     _SNOOZE_RE = re.compile(r"\b(?:snooze|delay|postpone|remind\s+me\s+again)\b", re.IGNORECASE)
-    if _SNOOZE_RE.search(user_message):
+    if not _skip and _SNOOZE_RE.search(user_message):
         _dur_match = re.search(
             r"(?:for\s+)?(\d+\s*(?:min(?:utes?|s)?|hr?s?|hours?|days?))",
             user_message, re.IGNORECASE,
@@ -1049,7 +1051,7 @@ async def chat(user_id: int, user_message: str) -> str:
                 return reply
 
     # HA turn on/off/toggle — only if we can fully resolve the entity from memory
-    if Config.HA_URL:
+    if not _skip and Config.HA_URL:
         ha_tool, ha_entity = _parse_ha_request(user_message, memories)
         if ha_tool and ha_entity:
             logger.info(f"Pre-model HA intercept: {ha_tool}(entity_id={ha_entity!r})")
@@ -1060,7 +1062,7 @@ async def chat(user_id: int, user_message: str) -> str:
             return reply
 
     # Calendar
-    if Config.CALDAV_URL and Config.CALDAV_USERNAME and Config.CALDAV_PASSWORD:
+    if not _skip and Config.CALDAV_URL and Config.CALDAV_USERNAME and Config.CALDAV_PASSWORD:
         _CAL_WORDS = ("calendar", "schedule", "events", "appointments", "agenda")
         if any(w in user_message.lower() for w in _CAL_WORDS):
             today_str = datetime.now(ZoneInfo(Config.TIMEZONE)).strftime("%Y-%m-%d")
@@ -1073,7 +1075,7 @@ async def chat(user_id: int, user_message: str) -> str:
             return reply
 
     # Weather
-    if Config.HA_WEATHER_ENTITY:
+    if not _skip and Config.HA_WEATHER_ENTITY:
         _WEATHER_WORDS = ("weather", "temperature", "forecast", "outside", "rain", "sunny", "cold", "hot", "humid")
         if any(w in user_message.lower() for w in _WEATHER_WORDS):
             logger.info("Pre-model weather intercept")
@@ -1095,7 +1097,7 @@ async def chat(user_id: int, user_message: str) -> str:
         re.IGNORECASE,
     )
     _cl_match = _CREATE_LIST_RE.search(user_message)
-    if _cl_match:
+    if not _skip and _cl_match:
         _lname = _sq(_cl_match.group(1))
         logger.info(f"Pre-model todo create list intercept: name={_lname!r}")
         result = await handle_tool_call("todo_create_list", {"name": _lname}, user_id)
@@ -1117,7 +1119,7 @@ async def chat(user_id: int, user_message: str) -> str:
         re.IGNORECASE,
     )
     _clr_match = _CLEAR_LIST_QUANT_RE.search(user_message) or _CLEAR_LIST_VERB_RE.search(user_message)
-    if _clr_match:
+    if not _skip and _clr_match:
         _lname = _sq(_clr_match.group(1)).strip()
         logger.info(f"Pre-model todo clear list intercept: list={_lname!r}")
         result = await handle_tool_call("todo_clear_list", {"list_name": _lname}, user_id)
@@ -1135,7 +1137,7 @@ async def chat(user_id: int, user_message: str) -> str:
         re.IGNORECASE,
     )
     _di_match = _DEL_ITEM_RE.search(user_message)
-    if _di_match:
+    if not _skip and _di_match:
         _item_q = _sq(_di_match.group(1))
         _list_q = _sq(_di_match.group(2)).strip()
         logger.info(f"Pre-model todo delete item intercept: item={_item_q!r} list={_list_q!r}")
@@ -1163,7 +1165,7 @@ async def chat(user_id: int, user_message: str) -> str:
         re.IGNORECASE,
     )
     _dl_match = _DEL_LIST_RE1.search(user_message) or _DEL_LIST_RE2.search(user_message)
-    if _dl_match:
+    if not _skip and _dl_match:
         _lname = _sq(_dl_match.group(1))
         logger.info(f"Pre-model todo delete list intercept: name={_lname!r}")
         result = await handle_tool_call("todo_delete_list", {"name": _lname}, user_id)
@@ -1185,7 +1187,7 @@ async def chat(user_id: int, user_message: str) -> str:
         re.IGNORECASE,
     )
     _ai_match = _ADD_1_RE.search(user_message) or _ADD_2_RE.search(user_message) or _ADD_3_RE.search(user_message)
-    if _ai_match:
+    if not _skip and _ai_match:
         _item_content = _sq(_ai_match.group(1))
         _todo_list = _sq(_ai_match.group(2)).strip()
         logger.info(f"Pre-model todo add item intercept: content={_item_content!r} list={_todo_list!r}")
@@ -1214,7 +1216,7 @@ async def chat(user_id: int, user_message: str) -> str:
         re.IGNORECASE,
     )
     _sm_pre = _STORE_RE_PRE.search(user_message) or _LIST_RE_PRE.search(user_message) or _LIST_SHOW_RE.search(user_message)
-    if _sm_pre:
+    if not _skip and _sm_pre:
         _list_name = _sm_pre.group(1).strip().rstrip("?").strip()
         _list_name = re.sub(r"^the\s+", "", _list_name, flags=re.IGNORECASE).strip()
         _list_name = re.sub(r"\s+(?:store|shop|supermarket|market|pharmacy)$", "", _list_name, flags=re.IGNORECASE).strip()
@@ -1238,7 +1240,7 @@ async def chat(user_id: int, user_message: str) -> str:
         return todo_result
 
     # Meal plan
-    if Config.ANYLIST_EMAIL:
+    if not _skip and Config.ANYLIST_EMAIL:
         _MEAL_WORDS_PRE = ("dinner", "lunch", "breakfast", "meal", "meals", "supper", "eating", "food")
         if any(w in user_message.lower() for w in _MEAL_WORDS_PRE):
             today_str = datetime.now(ZoneInfo(Config.TIMEZONE)).strftime("%Y-%m-%d")
@@ -1259,7 +1261,7 @@ async def chat(user_id: int, user_message: str) -> str:
         re.IGNORECASE,
     )
     _sm_search = _SEARCH_CMD_RE.search(user_message)
-    if _sm_search:
+    if not _skip and _sm_search:
         _search_query = _sm_search.group(1).strip().rstrip("?").strip()
         logger.info(f"Pre-model web search intercept: query={_search_query!r}")
         try:

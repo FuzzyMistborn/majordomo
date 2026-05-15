@@ -67,6 +67,11 @@ CREATE TABLE IF NOT EXISTS user_settings (
     PRIMARY KEY(user_id, key)
 );
 
+CREATE TABLE IF NOT EXISTS signal_users (
+    id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    phone TEXT NOT NULL UNIQUE
+);
+
 CREATE INDEX IF NOT EXISTS idx_todo_lists_user_name ON todo_lists(user_id, name);
 CREATE INDEX IF NOT EXISTS idx_todo_items_list_created ON todo_items(list_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_reminders_user_active ON reminders(user_id, fired, recurrence, fire_at);
@@ -104,6 +109,15 @@ async def _apply_migrations(db: aiosqlite.Connection) -> None:
         if "smart" not in columns:
             await db.execute("ALTER TABLE reminders ADD COLUMN smart INTEGER NOT NULL DEFAULT 0")
         await _record_migration(db, "001_add_reminder_smart")
+
+    if not await _migration_applied(db, "002_signal_users_sequence"):
+        # Seed the autoincrement sequence so Signal user IDs start at 10_000_000_000,
+        # safely above any realistic Telegram user ID.
+        await db.execute(
+            "INSERT OR IGNORE INTO signal_users (id, phone) VALUES (9999999999, '__sentinel__')"
+        )
+        await db.execute("DELETE FROM signal_users WHERE phone = '__sentinel__'")
+        await _record_migration(db, "002_signal_users_sequence")
 
 
 async def init_db():
@@ -478,5 +492,25 @@ async def get_user_setting(user_id: int, key: str) -> str | None:
             "SELECT value FROM user_settings WHERE user_id = ? AND key = ?",
             (user_id, key),
         )
+        row = await cur.fetchone()
+        return row[0] if row else None
+
+
+# ── Signal Users ──────────────────────────────────────────────────────────────
+
+async def get_or_create_signal_user_id(phone: str) -> int:
+    async with aiosqlite.connect(DB) as db:
+        cur = await db.execute("SELECT id FROM signal_users WHERE phone = ?", (phone,))
+        row = await cur.fetchone()
+        if row:
+            return row[0]
+        cur = await db.execute("INSERT INTO signal_users (phone) VALUES (?)", (phone,))
+        await db.commit()
+        return cur.lastrowid
+
+
+async def get_signal_phone_by_user_id(user_id: int) -> str | None:
+    async with aiosqlite.connect(DB) as db:
+        cur = await db.execute("SELECT phone FROM signal_users WHERE id = ?", (user_id,))
         row = await cur.fetchone()
         return row[0] if row else None

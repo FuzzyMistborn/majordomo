@@ -12,7 +12,7 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 
-# Will be set by main.py after bot is initialised
+# Set by main.py after the Telegram bot is initialised (None when Signal-only)
 _bot = None
 _scheduler: AsyncIOScheduler | None = None
 
@@ -50,15 +50,19 @@ def get_scheduler() -> AsyncIOScheduler:
 
 
 async def _send_message(user_id: int, text: str):
+    phone = await db.get_signal_phone_by_user_id(user_id)
+    if phone:
+        from services import signal as signal_svc
+        await signal_svc.send_message(phone, text)
+        return
     if _bot is None:
-        logger.error("Bot not set in scheduler, cannot send message.")
+        logger.error("Bot not set in scheduler, cannot send message to user %s.", user_id)
         return
     try:
-        # Split long messages
-        for i in range(0, len(text), 4096):
-            await _bot.send_message(chat_id=user_id, text=text[i:i+4096])
+        for i in range(0, max(len(text), 1), 4096):
+            await _bot.send_message(chat_id=user_id, text=text[i:i + 4096])
     except Exception as e:
-        logger.error(f"Failed to send message to {user_id}: {e}")
+        logger.error(f"Failed to send Telegram message to {user_id}: {e}")
 
 
 async def _run_smart_reminder(reminder_id: int, user_id: int, instruction: str):
@@ -69,7 +73,7 @@ async def _run_smart_reminder(reminder_id: int, user_id: int, instruction: str):
     try:
         from ai.agent import chat
         logger.info(f"Running smart reminder {reminder_id} for user {user_id}: {instruction[:80]}")
-        result = await chat(user_id, instruction)
+        result = await chat(user_id, instruction, smart_reminder=True)
         await _send_message(user_id, f"🌅 Morning Briefing:\n\n{result}")
     except Exception as e:
         logger.error(f"Smart reminder {reminder_id} failed: {e}", exc_info=True)

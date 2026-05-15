@@ -6,10 +6,15 @@ services:
     volumes:
       - bot_data:/data
     environment:
-      # ── Required ──────────────────────────────────────────────────────────
-      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
-      - ALLOWED_USER_IDS=${ALLOWED_USER_IDS}          # comma-separated Telegram user IDs
+      # ── Required (at least one messaging platform must be configured) ──────
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN:-}
+      - ALLOWED_USER_IDS=${ALLOWED_USER_IDS:-}        # comma-separated Telegram user IDs
       - TAVILY_API_KEY=${TAVILY_API_KEY}
+
+      # ── Signal (optional; requires signal-cli-rest-api) ───────────────────
+      - SIGNAL_API_URL=${SIGNAL_API_URL:-}            # e.g. http://signal-cli-rest-api:8080
+      - SIGNAL_SENDER_NUMBER=${SIGNAL_SENDER_NUMBER:-} # e.g. +12345678901
+      - SIGNAL_ALLOWED_NUMBERS=${SIGNAL_ALLOWED_NUMBERS:-} # comma-separated phone numbers
       # ── llama.cpp ─────────────────────────────────────────────────────────
       - LLAMACPP_HOST=${LLAMACPP_HOST:-http://host.docker.internal:8080/v1/}
       - LLAMACPP_MODEL=${LLAMACPP_MODEL:-gemma-4-e4b}

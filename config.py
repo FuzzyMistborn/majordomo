@@ -37,6 +37,15 @@ class Config:
         os.environ.get("ALLOWED_USER_IDS", "")
     )
 
+    # Signal
+    SIGNAL_API_URL: str = os.environ.get("SIGNAL_API_URL", "")
+    SIGNAL_SENDER_NUMBER: str = os.environ.get("SIGNAL_SENDER_NUMBER", "")
+    SIGNAL_ALLOWED_NUMBERS: list[str] = [
+        n.strip()
+        for n in os.environ.get("SIGNAL_ALLOWED_NUMBERS", "").split(",")
+        if n.strip()
+    ]
+
     # Tavily
     TAVILY_API_KEY: str = os.environ.get("TAVILY_API_KEY", "")
 
@@ -98,15 +107,24 @@ class Config:
     @classmethod
     def validate(cls) -> None:
         errors: list[str] = []
-        if not cls.TELEGRAM_TOKEN:
-            errors.append("TELEGRAM_TOKEN is required.")
-        if not cls.ALLOWED_USER_IDS:
-            errors.append("ALLOWED_USER_IDS must contain at least one Telegram user ID.")
+        telegram_enabled = bool(cls.TELEGRAM_TOKEN)
+        signal_enabled = bool(cls.SIGNAL_API_URL and cls.SIGNAL_SENDER_NUMBER)
+        if not telegram_enabled and not signal_enabled:
+            errors.append(
+                "At least one platform must be configured: set TELEGRAM_TOKEN, "
+                "or set both SIGNAL_API_URL and SIGNAL_SENDER_NUMBER."
+            )
+        if telegram_enabled and not cls.ALLOWED_USER_IDS:
+            errors.append("ALLOWED_USER_IDS must contain at least one Telegram user ID when Telegram is enabled.")
         if cls.INVALID_ALLOWED_USER_IDS:
             errors.append(
                 "ALLOWED_USER_IDS contains invalid values: "
                 + ", ".join(cls.INVALID_ALLOWED_USER_IDS)
             )
+        if signal_enabled and not cls.SIGNAL_ALLOWED_NUMBERS:
+            errors.append("SIGNAL_ALLOWED_NUMBERS must contain at least one phone number when Signal is enabled.")
+        if bool(cls.SIGNAL_API_URL) != bool(cls.SIGNAL_SENDER_NUMBER):
+            errors.append("SIGNAL_API_URL and SIGNAL_SENDER_NUMBER must both be set together.")
         if not cls.TAVILY_API_KEY:
             errors.append("TAVILY_API_KEY is required.")
         if _INVALID_INT_SETTINGS:
