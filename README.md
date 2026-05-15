@@ -1,6 +1,6 @@
 # Majordomo
 
-A self-hosted Telegram bot powered by llama.cpp. Manages to-do lists, reminders, web search, and Home Assistant control — all via natural language. Runs entirely on your own infrastructure; nothing leaves your network except Telegram API calls and Tavily search queries.
+A self-hosted bot powered by llama.cpp. Manages to-do lists, reminders, web search, and Home Assistant control — all via natural language. Supports **Telegram** and **Signal** (run either or both simultaneously). Runs entirely on your own infrastructure; nothing leaves your network except Telegram/Signal API calls and Tavily search queries.
 
 The bot has a personality: it responds as **Wit** (Hoid), an ancient, sardonic figure who finds the work beneath him but does it anyway, with style.
 
@@ -17,7 +17,7 @@ The bot has a personality: it responds as **Wit** (Hoid), an ancient, sardonic f
 - **Home Assistant** — query entity states, turn on/off/toggle devices, call any service, fetch weather
 - **AnyList** — read shopping list items and query the meal plan for any date range
 - **CalDAV** — read calendar events grouped by day, with date ranges resolved from natural language
-- **User whitelist** — only allowed Telegram user IDs can interact
+- **User whitelist** — only allowed Telegram user IDs / Signal phone numbers can interact
 
 ---
 
@@ -25,7 +25,9 @@ The bot has a personality: it responds as **Wit** (Hoid), an ancient, sardonic f
 
 - Docker + Docker Compose
 - A [llama.cpp](https://github.com/ggml-org/llama.cpp) server running somewhere accessible with a tool-capable model loaded
-- A Telegram bot token (from [@BotFather](https://t.me/BotFather))
+- At least one messaging platform configured:
+  - **Telegram**: a bot token from [@BotFather](https://t.me/BotFather)
+  - **Signal**: a [signal-cli REST API](https://github.com/bbernhard/signal-cli-rest-api) instance with a registered sender number
 - A [Tavily API key](https://app.tavily.com) (free tier: 1 000 queries/month)
 
 ---
@@ -149,8 +151,11 @@ Saved facts are injected into every prompt so the bot applies them automatically
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `TELEGRAM_TOKEN` | ✅ | — | Telegram bot token (from @BotFather) |
-| `ALLOWED_USER_IDS` | ✅ | — | Comma-separated Telegram user IDs |
+| `TELEGRAM_TOKEN` | ✅* | — | Telegram bot token (from @BotFather); required if not using Signal |
+| `ALLOWED_USER_IDS` | ✅* | — | Comma-separated Telegram user IDs; required when Telegram is enabled |
+| `SIGNAL_API_URL` | ✅* | — | signal-cli REST API base URL; required if not using Telegram |
+| `SIGNAL_SENDER_NUMBER` | ✅* | — | Registered Signal phone number (e.g. `+15551234567`); required with `SIGNAL_API_URL` |
+| `SIGNAL_ALLOWED_NUMBERS` | ✅* | — | Comma-separated Signal phone numbers allowed to interact; required when Signal is enabled |
 | `TAVILY_API_KEY` | ✅ | — | Tavily Search API key |
 | `LLAMACPP_HOST` | — | `http://192.168.50.25:8080/v1/` | llama.cpp server base URL (must include `/v1/`) |
 | `LLAMACPP_MODEL` | — | `gemma-4-e4b` | Model name passed to llama.cpp |
@@ -191,7 +196,7 @@ The bot loads personalities from Markdown files in `personalities/`. Each filena
 Switch personality to plain
 ```
 
-The selected personality is stored per Telegram user and can be changed on the fly. Use `List personalities` to see available options and `What personality are you using?` to check the current one.
+The selected personality is stored per user and can be changed on the fly. Use `List personalities` to see available options and `What personality are you using?` to check the current one.
 
 `personality.md` is still supported as the legacy default Wit prompt.
 

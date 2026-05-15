@@ -13,17 +13,17 @@ docker compose logs -f
 docker compose up -d --build
 ```
 
-There is no test suite. The bot is validated by running it and sending messages through Telegram.
+There is no test suite. The bot is validated by running it and sending messages through Telegram or Signal.
 
 ## Architecture
 
-Majordomo is a Telegram bot that routes natural language to a llama.cpp-backed AI agent. The main flow:
+Majordomo is a Telegram/Signal bot that routes natural language to a llama.cpp-backed AI agent. The main flow:
 
 ```
-Telegram update → main.py → agent.chat() → tool-calling loop → tool handlers → services
+Telegram update / Signal poll → main.py → agent.chat() → tool-calling loop → tool handlers → services
 ```
 
-**`main.py`** — Telegram bot setup, command handlers (`/start`, `/help`, `/clear`), and the message handler that calls `agent.chat()` then strips markdown from the reply before sending.
+**`main.py`** — Telegram bot setup + Signal polling loop, command handlers (`/start`, `/help`, `/clear`), and the message handler that calls `agent.chat()` then strips markdown from the reply before sending. Either platform can run standalone or both can run simultaneously.
 
 **`ai/agent.py`** — Core request processing. Two-layer design:
 1. **Pre-model intercepts** — regex/deterministic handlers that bypass the model entirely for common patterns (reminder list, reminder delete, snooze, HA on/off/toggle, weather, todo CRUD, meal plan, web search). These fire first in `chat()` to prevent hallucination.
