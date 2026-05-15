@@ -499,6 +499,9 @@ async def get_user_setting(user_id: int, key: str) -> str | None:
 # ── Signal Users ──────────────────────────────────────────────────────────────
 
 async def get_or_create_signal_user_id(phone: str) -> int:
+    from config import Config
+    if phone in Config.SIGNAL_USER_MAP:
+        return Config.SIGNAL_USER_MAP[phone]
     async with aiosqlite.connect(DB) as db:
         cur = await db.execute("SELECT id FROM signal_users WHERE phone = ?", (phone,))
         row = await cur.fetchone()

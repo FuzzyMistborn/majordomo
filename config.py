@@ -17,6 +17,26 @@ def _parse_allowed_user_ids(raw: str) -> tuple[list[int], list[str]]:
     return user_ids, invalid
 
 
+def _parse_signal_user_map(raw: str) -> tuple[dict[str, int], list[str]]:
+    """Parse SIGNAL_USER_MAP entries of the form '+phone:telegram_id,...'."""
+    mapping: dict[str, int] = {}
+    invalid: list[str] = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        parts = entry.rsplit(":", 1)
+        if len(parts) != 2:
+            invalid.append(entry)
+            continue
+        phone, tid = parts[0].strip(), parts[1].strip()
+        try:
+            mapping[phone] = int(tid)
+        except ValueError:
+            invalid.append(entry)
+    return mapping, invalid
+
+
 _INVALID_INT_SETTINGS: list[str] = []
 
 
@@ -45,6 +65,9 @@ class Config:
         for n in os.environ.get("SIGNAL_ALLOWED_NUMBERS", "").split(",")
         if n.strip()
     ]
+    SIGNAL_USER_MAP, INVALID_SIGNAL_USER_MAP = _parse_signal_user_map(
+        os.environ.get("SIGNAL_USER_MAP", "")
+    )
 
     # Tavily
     TAVILY_API_KEY: str = os.environ.get("TAVILY_API_KEY", "")
@@ -120,6 +143,11 @@ class Config:
             errors.append(
                 "ALLOWED_USER_IDS contains invalid values: "
                 + ", ".join(cls.INVALID_ALLOWED_USER_IDS)
+            )
+        if cls.INVALID_SIGNAL_USER_MAP:
+            errors.append(
+                "SIGNAL_USER_MAP contains invalid entries (expected +phone:telegram_id): "
+                + ", ".join(cls.INVALID_SIGNAL_USER_MAP)
             )
         if signal_enabled and not cls.SIGNAL_ALLOWED_NUMBERS:
             errors.append("SIGNAL_ALLOWED_NUMBERS must contain at least one phone number when Signal is enabled.")

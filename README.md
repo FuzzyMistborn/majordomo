@@ -159,6 +159,7 @@ Saved facts are injected into every prompt so the bot applies them automatically
 | `SIGNAL_API_URL` | ✅* | — | signal-cli REST API base URL; required if not using Telegram |
 | `SIGNAL_SENDER_NUMBER` | ✅* | — | Registered Signal phone number (e.g. `+15551234567`); required with `SIGNAL_API_URL` |
 | `SIGNAL_ALLOWED_NUMBERS` | ✅* | — | Comma-separated Signal phone numbers allowed to interact; required when Signal is enabled |
+| `SIGNAL_USER_MAP` | — | _(none)_ | Map Signal numbers to Telegram user IDs to share data across platforms (e.g. `+15551234567:123456789,+15559876543:987654321`) |
 | `TAVILY_API_KEY` | ✅ | — | Tavily Search API key |
 | `LLAMACPP_HOST` | — | `http://192.168.50.25:8080/v1/` | llama.cpp server base URL (must include `/v1/`) |
 | `LLAMACPP_MODEL` | — | `gemma-4-e4b` | Model name passed to llama.cpp |
@@ -187,6 +188,20 @@ The SQLite database is stored in a Docker volume at `/data/bot.db`. To back it u
 ```bash
 docker run --rm -v majordomo_bot_data:/data -v $(pwd):/backup \
   alpine cp /data/bot.db /backup/bot-backup.db
+```
+
+### Cross-platform data sharing
+
+When `SIGNAL_USER_MAP` maps a Signal number to a Telegram user ID, the Signal user is assigned that Telegram ID internally so both platforms read and write the same lists, reminders, and memories.
+
+If the Signal user previously interacted with the bot without a mapping, they will have data stored under a different (auto-generated) ID. To migrate that existing data, run the following against your database **before** adding the mapping (replace `OLD_SIGNAL_ID` with the numeric ID from the `signal_users` table and `TELEGRAM_ID` with the target Telegram user ID):
+
+```sql
+UPDATE todo_lists  SET user_id = TELEGRAM_ID WHERE user_id = OLD_SIGNAL_ID;
+UPDATE reminders   SET user_id = TELEGRAM_ID WHERE user_id = OLD_SIGNAL_ID;
+UPDATE notes       SET user_id = TELEGRAM_ID WHERE user_id = OLD_SIGNAL_ID;
+UPDATE memories    SET user_id = TELEGRAM_ID WHERE user_id = OLD_SIGNAL_ID;
+UPDATE user_settings SET user_id = TELEGRAM_ID WHERE user_id = OLD_SIGNAL_ID;
 ```
 
 ---
