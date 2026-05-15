@@ -1,0 +1,43 @@
+steps:
+  - name: Build and push release
+    image: fuzzymistborn/docker-alpine-skopeo:latest
+    environment:
+      ghcr_pass:
+        from_secret: ghcr_pass
+    commands:
+      - docker login ghcr.io -u fuzzymistborn -p $ghcr_pass
+      - docker build -t ghcr.io/fuzzymistborn/majordomo:latest .
+      - docker push --all-tags ghcr.io/fuzzymistborn/majordomo
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  - name: Notify Success
+    image: appleboy/drone-telegram
+    settings:
+      token:
+        from_secret: tg_token
+      to:
+        from_secret: tg_id
+      format: markdown
+      message: "✅  Build for `${CI_REPO_NAME}` was *successful*!\n🌐  [Output](${CI_PIPELINE_URL})\n📝  Commit: ${CI_COMMIT_MESSAGE}"
+    when:
+      - event: manual
+        status: [success]
+
+  - name: Notify Failure
+    image: appleboy/drone-telegram
+    settings:
+      token:
+        from_secret: tg_token
+      to:
+        from_secret: tg_id
+      format: markdown
+      message: "❌  Build for `${CI_REPO_NAME}` has *FAILED*!\n🌐  [Output](${CI_PIPELINE_URL})\n📝  Commit: ${CI_COMMIT_MESSAGE}"
+    when:
+      - event: manual
+        status: [failure]
+
+when:
+  - event: manual
+  - event: push
+    branch: main
