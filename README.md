@@ -4,6 +4,9 @@ A self-hosted bot powered by llama.cpp. Manages to-do lists, reminders, web sear
 
 The bot has a personality: it responds as **Wit** (Hoid), an ancient, sardonic figure who finds the work beneath him but does it anyway, with style.
 
+> [!WARNING]
+> Disclosure: This was written by AI.  So while it has been tested for bugs/functionality, I cannot guarantee its security. Run at your own risk!
+
 ---
 
 ## Features
