@@ -9,6 +9,7 @@ from apscheduler.triggers.date import DateTrigger
 
 import database as db
 from config import Config
+from ctx import firing_reminder_id
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,11 @@ async def _run_smart_reminder(reminder_id: int, user_id: int, instruction: str):
     try:
         from ai.agent import chat
         logger.info(f"Running smart reminder {reminder_id} for user {user_id}: {instruction[:80]}")
-        result = await chat(user_id, instruction, smart_reminder=True)
+        token = firing_reminder_id.set(reminder_id)
+        try:
+            result = await chat(user_id, instruction, smart_reminder=True)
+        finally:
+            firing_reminder_id.reset(token)
         await _send_message(user_id, f"🌅 Morning Briefing:\n\n{result}")
     except Exception as e:
         logger.error(f"Smart reminder {reminder_id} failed: {e}", exc_info=True)

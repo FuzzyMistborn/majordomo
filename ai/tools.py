@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 import database as db
 import scheduler as sched
 from config import Config
+from ctx import firing_reminder_id
 from services import anylist as anylist_service
 from services import calendar as cal_service
 from services import homeassistant as ha
@@ -808,6 +809,9 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
 
             case "reminder_list":
                 reminders = await db.get_reminders(user_id)
+                exclude = firing_reminder_id.get()
+                if exclude is not None:
+                    reminders = [r for r in reminders if r["id"] != exclude]
                 if not reminders:
                     return "No active reminders."
                 lines = []
