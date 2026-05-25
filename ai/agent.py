@@ -189,7 +189,7 @@ DATE REFERENCE — use these exact values when constructing ISO datetimes:
 NEVER use any other year. NEVER guess a date — always derive from the reference above.
 NEVER search the web for the current date or time — it is already provided above.
 
-You have tools for: to-do lists, reminders, web search, Home Assistant control, calendar management, and AnyList (shopping lists and meal plans).
+You have tools for: lists (internal, writable), reminders, web search, Home Assistant control, calendar management, and shopping lists/meal plans (AnyList, read-only).
 
 Operational rules:
 - Be concise (Telegram chat). Do NOT use Markdown formatting (no **bold**, no *italic*, no `code`). Plain text only.
@@ -207,10 +207,12 @@ Home Assistant rules:
 - Use ha_call_service for advanced control (brightness, temperature, etc).
 - NEVER use search_web for Home Assistant. If entity not found, ask the user for the exact entity_id.
 Calendar: use get_calendar_events(start, end) to list events. start and end are ISO 8601 dates (YYYY-MM-DD). If no date is specified, default to today. You can only READ calendar events — creating, updating, and deleting events is not supported.
-AnyList rules:
-- For ANY question about what's for dinner, lunch, breakfast, or what meals are planned, you MUST call anylist_get_meal_plan(start, end). Never answer a meal question without calling this tool first.
-- For ANY shopping list question — including "what do I need to get at [store]", "what's on my [name] list", "what should I get from [store]" — call anylist_get_list(list_name="[store or list name]") immediately. The store name IS the list name. Never ask for clarification; never answer without calling this tool first.
-- To discover available list names, call anylist_get_list() with no arguments.
+Shopping list rules (AnyList — read-only):
+- Shopping lists and meal plans come from AnyList and are read-only. Never try to add or modify items on shopping lists.
+- If someone asks to add something to a shopping list, tell them shopping lists are read-only and they should add it in the AnyList app directly.
+- For ANY question about what's for dinner, lunch, breakfast, or what meals are planned, you MUST call shopping_get_meal_plan(start, end). Never answer a meal question without calling this tool first.
+- For ANY shopping list question — including "what do I need to get at [store]", "what's on my [name] list", "what should I get from [store]" — call shopping_get_list(list_name="[store or list name]") immediately. The store name IS the list name. Never ask for clarification; never answer without calling this tool first.
+- To discover available shopping list names, call shopping_get_list() with no arguments.
 
 Memory rules:
 - When the user says "remember", "note that", or tells you a reusable fact (e.g. "my wife's calendar is Family", "the office light is light.office_main"), you MUST call the memory_save tool immediately. Do NOT just say you'll remember — call the tool.
@@ -497,18 +499,18 @@ async def reminders_command(user_id: int) -> str:
 
 async def lists_command(user_id: int) -> str:
     lines: list[str] = []
-    todo_lists = await db.get_todo_lists(user_id)
-    if todo_lists:
-        lines.append("To-do lists:")
-        lines.extend(f"- {item['name']}" for item in todo_lists)
+    user_lists = await db.get_todo_lists(user_id)
+    if user_lists:
+        lines.append("Your lists:")
+        lines.extend(f"- {item['name']}" for item in user_lists)
     else:
-        lines.append("No internal to-do lists found.")
+        lines.append("No lists found.")
 
     if Config.ANYLIST_EMAIL and Config.ANYLIST_PASSWORD:
-        anylist_result = await handle_tool_call("anylist_get_list", {}, user_id)
-        if not anylist_result.startswith("Tool error:"):
+        shopping_result = await handle_tool_call("shopping_get_list", {}, user_id)
+        if not shopping_result.startswith("Tool error:"):
             lines.append("")
-            lines.append(anylist_result)
+            lines.append(shopping_result)
 
     return "\n".join(lines)
 
@@ -951,7 +953,7 @@ async def chat(user_id: int, user_message: str, smart_reminder: bool = False) ->
             _urls = [l.strip() for l in _msg_lines]
             logger.info(f"URL auto-add intercept: list={_auto_list!r} count={len(_urls)}")
             for _url in _urls:
-                await handle_tool_call("todo_add_item", {"list_name": _auto_list, "content": _url}, user_id)
+                await handle_tool_call("list_add_item", {"list_name": _auto_list, "content": _url}, user_id)
             reply = f"Added {len(_urls)} link{'s' if len(_urls) != 1 else ''} to **{_auto_list.title()}**."
             _history[user_id].append({"role": "assistant", "content": reply})
             return reply
@@ -1100,7 +1102,7 @@ async def chat(user_id: int, user_message: str, smart_reminder: bool = False) ->
     if not _skip and _cl_match:
         _lname = _sq(_cl_match.group(1))
         logger.info(f"Pre-model todo create list intercept: name={_lname!r}")
-        result = await handle_tool_call("todo_create_list", {"name": _lname}, user_id)
+        result = await handle_tool_call("list_create", {"name": _lname}, user_id)
         _history[user_id].append({"role": "assistant", "content": result})
         return result
 
@@ -1122,7 +1124,7 @@ async def chat(user_id: int, user_message: str, smart_reminder: bool = False) ->
     if not _skip and _clr_match:
         _lname = _sq(_clr_match.group(1)).strip()
         logger.info(f"Pre-model todo clear list intercept: list={_lname!r}")
-        result = await handle_tool_call("todo_clear_list", {"list_name": _lname}, user_id)
+        result = await handle_tool_call("list_clear", {"list_name": _lname}, user_id)
         _history[user_id].append({"role": "assistant", "content": result})
         return result
 
@@ -1143,15 +1145,15 @@ async def chat(user_id: int, user_message: str, smart_reminder: bool = False) ->
         logger.info(f"Pre-model todo delete item intercept: item={_item_q!r} list={_list_q!r}")
         _item_id, _matched = await _find_todo_item_by_name(user_id, _list_q, _item_q)
         if _item_id is not None:
-            await handle_tool_call("todo_delete_item", {"item_id": _item_id}, user_id)
+            await handle_tool_call("list_remove_item", {"item_id": _item_id}, user_id)
             reply = f"Deleted {_matched} from **{_list_q.title()}**."
         else:
-            # Check if the item lives in AnyList (read-only) so we can give a useful message
+            # Check if the item lives in a shopping list (read-only) so we can give a useful message
             reply = f"Couldn't find {_item_q} on **{_list_q.title()}**."
             if Config.ANYLIST_EMAIL:
-                _al_check = await handle_tool_call("anylist_get_list", {"list_name": _list_q}, user_id)
+                _al_check = await handle_tool_call("shopping_get_list", {"list_name": _list_q}, user_id)
                 if not _al_check.startswith("Tool error:") and _item_q.rstrip("/").lower() in _al_check.lower():
-                    reply = f"That item is in your AnyList — remove it from the AnyList app directly."
+                    reply = f"That item is on your shopping list (AnyList) — remove it from the AnyList app directly."
         _history[user_id].append({"role": "assistant", "content": reply})
         return reply
 
@@ -1168,7 +1170,7 @@ async def chat(user_id: int, user_message: str, smart_reminder: bool = False) ->
     if not _skip and _dl_match:
         _lname = _sq(_dl_match.group(1))
         logger.info(f"Pre-model todo delete list intercept: name={_lname!r}")
-        result = await handle_tool_call("todo_delete_list", {"name": _lname}, user_id)
+        result = await handle_tool_call("list_delete", {"name": _lname}, user_id)
         _history[user_id].append({"role": "assistant", "content": result})
         return result
 
@@ -1191,9 +1193,9 @@ async def chat(user_id: int, user_message: str, smart_reminder: bool = False) ->
         _item_content = _sq(_ai_match.group(1))
         _todo_list = _sq(_ai_match.group(2)).strip()
         logger.info(f"Pre-model todo add item intercept: content={_item_content!r} list={_todo_list!r}")
-        result = await handle_tool_call("todo_add_item", {"list_name": _todo_list, "content": _item_content}, user_id)
+        result = await handle_tool_call("list_add_item", {"list_name": _todo_list, "content": _item_content}, user_id)
         if "not found" in result.lower() and Config.ANYLIST_EMAIL:
-            result += "\n\nNote: AnyList shopping lists (Groceries, Target, etc.) are read-only - add items directly in the AnyList app."
+            result += "\n\nNote: Shopping lists (Groceries, Target, etc.) are read-only — add items directly in the AnyList app."
         _history[user_id].append({"role": "assistant", "content": result})
         return result
 
@@ -1224,20 +1226,20 @@ async def chat(user_id: int, user_message: str, smart_reminder: bool = False) ->
         # If an internal list exists by this name, always prefer it (consistent with delete).
         _internal_list_id = await db.get_list_id(user_id, re.sub(r"\s+lists?$", "", _list_name, flags=re.IGNORECASE).strip())
         if _internal_list_id is not None:
-            todo_result = await handle_tool_call("todo_get_items", {"list_name": _list_name}, user_id)
-            _history[user_id].append({"role": "assistant", "content": todo_result})
-            return todo_result
-        # No internal list — try AnyList
+            list_result = await handle_tool_call("list_get_items", {"list_name": _list_name}, user_id)
+            _history[user_id].append({"role": "assistant", "content": list_result})
+            return list_result
+        # No internal list — try AnyList shopping lists
         if Config.ANYLIST_EMAIL:
-            anylist_result = await handle_tool_call("anylist_get_list", {"list_name": _list_name}, user_id)
-            if not anylist_result.startswith("Tool error:"):
-                _history[user_id].append({"role": "assistant", "content": anylist_result})
-                return anylist_result
-            logger.info(f"AnyList has no list named {_list_name!r}, trying internal todo")
-        # Fall back to internal todo
-        todo_result = await handle_tool_call("todo_get_items", {"list_name": _list_name}, user_id)
-        _history[user_id].append({"role": "assistant", "content": todo_result})
-        return todo_result
+            shopping_result = await handle_tool_call("shopping_get_list", {"list_name": _list_name}, user_id)
+            if not shopping_result.startswith("Tool error:"):
+                _history[user_id].append({"role": "assistant", "content": shopping_result})
+                return shopping_result
+            logger.info(f"AnyList has no shopping list named {_list_name!r}, trying internal lists")
+        # Fall back to internal list
+        list_result = await handle_tool_call("list_get_items", {"list_name": _list_name}, user_id)
+        _history[user_id].append({"role": "assistant", "content": list_result})
+        return list_result
 
     # Meal plan
     if not _skip and Config.ANYLIST_EMAIL:
@@ -1248,7 +1250,7 @@ async def chat(user_id: int, user_message: str, smart_reminder: bool = False) ->
             end_str = grounded_dates[-1] if grounded_dates else today_str
             logger.info(f"Pre-model meal plan intercept: {start_str} to {end_str}")
             fallback_result = await handle_tool_call(
-                "anylist_get_meal_plan", {"start": start_str, "end": end_str}, user_id
+                "shopping_get_meal_plan", {"start": start_str, "end": end_str}, user_id
             )
             quip = await _personality_quip(fallback_result, user_id=user_id)
             reply = fallback_result + ("\n\n" + quip if quip else "")
@@ -1490,8 +1492,8 @@ async def chat(user_id: int, user_message: str, smart_reminder: bool = False) ->
                 _memory_saved = True
 
             # Return certain results directly to prevent model reformatting / greeting preamble
-            # Use _resolved_name so aliases (e.g. get_list → anylist_get_list) are caught too.
-            if _resolved_name == "todo_get_items" and len(tool_calls) == 1:
+            # Use _resolved_name so aliases (e.g. get_list → shopping_get_list) are caught too.
+            if _resolved_name == "list_get_items" and len(tool_calls) == 1:
                 _history[user_id].append({"role": "assistant", "content": result})
                 return result
 
@@ -1504,11 +1506,11 @@ async def chat(user_id: int, user_message: str, smart_reminder: bool = False) ->
                 _history[user_id].append({"role": "assistant", "content": reply})
                 return reply
 
-            if _resolved_name == "anylist_get_list" and len(tool_calls) == 1 and fn_args.get("list_name"):
+            if _resolved_name == "shopping_get_list" and len(tool_calls) == 1 and fn_args.get("list_name"):
                 _history[user_id].append({"role": "assistant", "content": result})
                 return result
 
-            if _resolved_name == "anylist_get_meal_plan" and len(tool_calls) == 1:
+            if _resolved_name == "shopping_get_meal_plan" and len(tool_calls) == 1:
                 quip = await _personality_quip(result, user_id=user_id)
                 reply = result + ("\n\n" + quip if quip else "")
                 _history[user_id].append({"role": "assistant", "content": reply})

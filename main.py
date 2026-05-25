@@ -81,12 +81,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Majordomo is ready.\n\n"
         "I can help with:\n"
-        "• 📋 To-do lists\n"
+        "• 📋 Lists (create, manage, and track items)\n"
         "• ⏰ Reminders, including recurring and smart reminders\n"
         "• 🔍 Web search\n"
         "• 🏠 Home Assistant control\n"
         "• 📅 Calendar events\n"
-        "• 🛒 AnyList shopping lists and meal plans\n"
+        "• 🛒 Shopping lists and meal plans (AnyList, read-only)\n"
         "• 🎭 Switchable personalities\n\n"
         "Send a natural-language request, or use /help for examples.",
     )
@@ -105,7 +105,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/personality list — Show available personalities.\n"
         "/personality set plain — Switch personality.\n"
         "/reminders — List active reminders.\n"
-        "/lists — List internal to-do lists and AnyList lists.\n\n"
+        "/lists — Show your writable lists and shopping lists (AnyList).\n\n"
         "*Examples:*\n"
         "• _\"Remind me to call mom tomorrow at 3pm\"_\n"
         "• _\"Add milk to my shopping list\"_\n"
@@ -211,9 +211,9 @@ _SIGNAL_HELP = (
 
 _SIGNAL_START = (
     "Majordomo is ready.\n\n"
-    "I can help with: to-do lists, reminders (including recurring and smart), "
-    "web search, Home Assistant control, calendar events, AnyList shopping lists "
-    "and meal plans, and switchable personalities.\n\n"
+    "I can help with: lists, reminders (including recurring and smart), "
+    "web search, Home Assistant control, calendar events, shopping lists "
+    "and meal plans (AnyList, read-only), and switchable personalities.\n\n"
     "Send a natural-language request, or use /help for examples."
 )
 

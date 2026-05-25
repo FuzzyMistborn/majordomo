@@ -75,36 +75,36 @@ def _parse_datetime(dt_str: str) -> datetime:
 
 
 TOOL_DEFINITIONS = [
-    # ── Todo ──
+    # ── Lists (internal, writable) ──
     {
         "type": "function",
         "function": {
-            "name": "todo_create_list",
-            "description": "Create a new named to-do list.",
+            "name": "list_create",
+            "description": "Create a new named list.",
             "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "todo_delete_list",
-            "description": "Delete a to-do list and all its items.",
+            "name": "list_delete",
+            "description": "Delete a list and all its items.",
             "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "todo_get_lists",
-            "description": "Get all to-do lists.",
+            "name": "list_get_all",
+            "description": "Get all your lists.",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "todo_add_item",
-            "description": "Add an item to a named to-do list.",
+            "name": "list_add_item",
+            "description": "Add an item to a named list.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -118,24 +118,24 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "todo_get_items",
-            "description": "Get all items in a named to-do list.",
+            "name": "list_get_items",
+            "description": "Get all items in a named list.",
             "parameters": {"type": "object", "properties": {"list_name": {"type": "string"}}, "required": ["list_name"]},
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "todo_delete_item",
-            "description": "Delete a specific to-do item by ID.",
+            "name": "list_remove_item",
+            "description": "Delete a specific list item by ID.",
             "parameters": {"type": "object", "properties": {"item_id": {"type": "integer"}}, "required": ["item_id"]},
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "todo_clear_list",
-            "description": "Remove all items from a named to-do list (keeps the list itself).",
+            "name": "list_clear",
+            "description": "Remove all items from a named list (keeps the list itself).",
             "parameters": {"type": "object", "properties": {"list_name": {"type": "string"}}, "required": ["list_name"]},
         },
     },
@@ -337,16 +337,16 @@ TOOL_DEFINITIONS = [
             },
         },
     },
-    # ── AnyList ──
+    # ── Shopping lists (AnyList, read-only) ──
     {
         "type": "function",
         "function": {
-            "name": "anylist_get_list",
-            "description": "Get items on an AnyList shopping list. If list_name is given, returns unchecked items in that list (pass include_checked=true for all). If list_name is omitted, returns the names of all available lists.",
+            "name": "shopping_get_list",
+            "description": "Get items on an AnyList shopping list (read-only). If list_name is given, returns unchecked items in that list (pass include_checked=true for all). If list_name is omitted, returns the names of all available shopping lists.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "list_name": {"type": "string", "description": "Name of the shopping list (e.g. 'Groceries'). Omit to list all available lists."},
+                    "list_name": {"type": "string", "description": "Name of the shopping list (e.g. 'Groceries'). Omit to list all available shopping lists."},
                     "include_checked": {"type": "boolean", "description": "Include already-checked/crossed-off items. Default false."},
                 },
                 "required": [],
@@ -356,8 +356,8 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "anylist_get_meal_plan",
-            "description": "Get the meal plan from AnyList for a date range. Use when the user asks what's for dinner, what meals are planned, etc. start and end are ISO 8601 dates (YYYY-MM-DD).",
+            "name": "shopping_get_meal_plan",
+            "description": "Get the meal plan from AnyList for a date range (read-only). Use when the user asks what's for dinner, what meals are planned, etc. start and end are ISO 8601 dates (YYYY-MM-DD).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -391,7 +391,7 @@ TOOL_DEFINITIONS = [
 _HA_TOOL_NAMES = frozenset({"ha_turn_on", "ha_turn_off", "ha_toggle", "ha_call_service", "ha_get_state", "ha_get_states"})
 _WEATHER_TOOL_NAMES = frozenset({"ha_get_weather"})
 _CALDAV_TOOL_NAMES = frozenset({"get_calendar_events"})
-_ANYLIST_TOOL_NAMES = frozenset({"anylist_get_list", "anylist_get_meal_plan"})
+_SHOPPING_TOOL_NAMES = frozenset({"shopping_get_list", "shopping_get_meal_plan"})
 
 
 def get_active_tool_definitions() -> list[dict]:
@@ -410,7 +410,7 @@ def get_active_tool_definitions() -> list[dict]:
             continue
         if name in _CALDAV_TOOL_NAMES and not caldav_enabled:
             continue
-        if name in _ANYLIST_TOOL_NAMES and not anylist_enabled:
+        if name in _SHOPPING_TOOL_NAMES and not anylist_enabled:
             continue
         active.append(td)
     return active
@@ -518,14 +518,14 @@ _TOOL_ALIASES: dict[str, str] = {
     "list_events": "get_calendar_events",
     "getcalendarevents": "get_calendar_events",
     "listcalendarevents": "get_calendar_events",
-    # anylist aliases
-    "get_shopping_list": "anylist_get_list",
-    "get_list": "anylist_get_list",
-    "shopping_list": "anylist_get_list",
-    "get_meal_plan": "anylist_get_meal_plan",
-    "get_meals": "anylist_get_meal_plan",
-    "get_dinner": "anylist_get_meal_plan",
-    "whats_for_dinner": "anylist_get_meal_plan",
+    # shopping list aliases (AnyList, read-only)
+    "get_shopping_list": "shopping_get_list",
+    "get_list": "shopping_get_list",
+    "shopping_list": "shopping_get_list",
+    "get_meal_plan": "shopping_get_meal_plan",
+    "get_meals": "shopping_get_meal_plan",
+    "get_dinner": "shopping_get_meal_plan",
+    "whats_for_dinner": "shopping_get_meal_plan",
     # HA control aliases
     "ha_turnoff": "ha_turn_off",
     "haturnoff": "ha_turn_off",
@@ -544,18 +544,19 @@ _TOOL_ALIASES: dict[str, str] = {
     "weather": "ha_get_weather",
     "current_weather": "ha_get_weather",
     "fetch_weather": "ha_get_weather",
-    # todo aliases
-    "add_task": "todo_add_item",
-    "add_todo": "todo_add_item",
-    "add_item": "todo_add_item",
-    "add_to_list": "todo_add_item",
-    "create_list": "todo_create_list",
-    "make_list": "todo_create_list",
-    "new_list": "todo_create_list",
-    "delete_list": "todo_delete_list",
-    "remove_list": "todo_delete_list",
-    "get_list_items": "todo_get_items",
-    "list_items": "todo_get_items",
+    # list aliases (internal, writable)
+    "add_task": "list_add_item",
+    "add_todo": "list_add_item",
+    "add_item": "list_add_item",
+    "add_to_list": "list_add_item",
+    "create_list": "list_create",
+    "make_list": "list_create",
+    "new_list": "list_create",
+    "delete_list": "list_delete",
+    "remove_list": "list_delete",
+    "get_list_items": "list_get_items",
+    "list_items": "list_get_items",
+    "get_lists": "list_get_all",
     # reminder aliases
     "create_reminder": "reminder_create",
     "add_reminder": "reminder_create",
@@ -575,6 +576,17 @@ _TOOL_ALIASES: dict[str, str] = {
     "add_memory": "memory_save",
     "set_memory": "memory_save",
     "forget_memory": "memory_delete",
+    # backwards-compat: old todo_* names → new list_* names
+    "todo_create_list": "list_create",
+    "todo_delete_list": "list_delete",
+    "todo_get_lists": "list_get_all",
+    "todo_add_item": "list_add_item",
+    "todo_get_items": "list_get_items",
+    "todo_delete_item": "list_remove_item",
+    "todo_clear_list": "list_clear",
+    # backwards-compat: old anylist_* names → new shopping_* names
+    "anylist_get_list": "shopping_get_list",
+    "anylist_get_meal_plan": "shopping_get_meal_plan",
 }
 
 
@@ -684,13 +696,13 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
     if name in _TOOL_ALIASES:
         name = _TOOL_ALIASES[name]
 
-    # Normalize todo_delete_list / todo_create_list arg name variants
-    if name in ("todo_delete_list", "todo_create_list"):
+    # Normalize list_delete / list_create arg name variants
+    if name in ("list_delete", "list_create"):
         if "list_name" in args and "name" not in args:
             args["name"] = args.pop("list_name")
 
-    # Normalize todo_add_item arg name variants
-    if name == "todo_add_item":
+    # Normalize list_add_item arg name variants
+    if name == "list_add_item":
         if "task" in args and "content" not in args:
             args["content"] = args.pop("task")
         if "item" in args and "content" not in args:
@@ -714,28 +726,28 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
 
     try:
         match name:
-            # ── Todo ──
-            case "todo_create_list":
+            # ── Lists (internal, writable) ──
+            case "list_create":
                 result = await db.create_todo_list(user_id, args["name"])
                 return f"Created **{result['name'].title()}**."
 
-            case "todo_delete_list":
+            case "list_delete":
                 name = _normalize_list_name(args["name"])
                 ok = await db.delete_todo_list(user_id, name)
                 return f"Deleted list **{name.title()}**." if ok else f"No list named **{name.title()}** found."
 
-            case "todo_get_lists":
+            case "list_get_all":
                 lists = await db.get_todo_lists(user_id)
                 if not lists:
-                    return "No to-do lists found."
+                    return "No lists found."
                 return json.dumps(lists)
 
-            case "todo_add_item":
+            case "list_add_item":
                 list_name = _normalize_list_name(args["list_name"])
                 result = await db.add_todo_item(user_id, list_name, args["content"])
                 return f"Added {args['content']} to **{list_name.title()}**."
 
-            case "todo_get_items":
+            case "list_get_items":
                 list_name = _normalize_list_name(args["list_name"])
                 items = await db.get_todo_items(user_id, list_name)
                 if not items:
@@ -745,11 +757,11 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
                     lines.append(f"{i}. {item['content']}")
                 return "\n".join(lines)
 
-            case "todo_delete_item":
+            case "list_remove_item":
                 ok = await db.delete_todo_item(args["item_id"], user_id)
                 return "Item deleted." if ok else f"Item id={args['item_id']} not found."
 
-            case "todo_clear_list":
+            case "list_clear":
                 list_name = _normalize_list_name(args["list_name"])
                 count = await db.clear_todo_list(user_id, list_name)
                 return f"Cleared **{list_name.title()}** ({count} item{'s' if count != 1 else ''} removed)."
@@ -972,8 +984,8 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
                     lines.append("OFF: " + ", ".join(f"{s['friendly_name']} ({s['entity_id']})" for s in off_states[:10]))
                 return "\n".join(lines) or "No entities found."
 
-            # ── AnyList ──
-            case "anylist_get_list":
+            # ── Shopping lists (AnyList, read-only) ──
+            case "shopping_get_list":
                 if not Config.ANYLIST_EMAIL:
                     return "AnyList is not configured. Set ANYLIST_EMAIL and ANYLIST_PASSWORD."
                 list_name = args.get("list_name")
@@ -983,7 +995,7 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
                     if not items:
                         label = "items" if include_checked else "unchecked items"
                         return f"No {label} in **{list_name.title()}**."
-                    lines = [f"**On your {list_name.title()} list:**"]
+                    lines = [f"**On your {list_name.title()} shopping list:**"]
                     for item in items:
                         label = item["name"]
                         if item["quantity"]:
@@ -997,10 +1009,10 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
                 else:
                     lists = await anylist_service.get_lists()
                     if not lists:
-                        return "No AnyList shopping lists found."
-                    return "Available lists: " + ", ".join(l["name"] for l in lists)
+                        return "No shopping lists found."
+                    return "Shopping lists: " + ", ".join(l["name"] for l in lists)
 
-            case "anylist_get_meal_plan":
+            case "shopping_get_meal_plan":
                 if not Config.ANYLIST_EMAIL:
                     return "AnyList is not configured. Set ANYLIST_EMAIL and ANYLIST_PASSWORD."
                 start = args.get("start") or args.get("date") or _now_local().strftime("%Y-%m-%d")
