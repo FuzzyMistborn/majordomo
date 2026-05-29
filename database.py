@@ -496,6 +496,17 @@ async def get_user_setting(user_id: int, key: str) -> str | None:
         return row[0] if row else None
 
 
+async def delete_user_setting(user_id: int, key: str) -> bool:
+    key = _bounded_text(key, "Setting key", Config.MAX_SETTING_KEY_CHARS)
+    async with aiosqlite.connect(DB) as db:
+        cur = await db.execute(
+            "DELETE FROM user_settings WHERE user_id = ? AND key = ?",
+            (user_id, key),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
 # ── Signal Users ──────────────────────────────────────────────────────────────
 
 async def get_or_create_signal_user_id(phone: str) -> int:
@@ -517,3 +528,12 @@ async def get_signal_phone_by_user_id(user_id: int) -> str | None:
         cur = await db.execute("SELECT phone FROM signal_users WHERE id = ?", (user_id,))
         row = await cur.fetchone()
         return row[0] if row else None
+
+
+async def get_signal_phone_for_user(user_id: int) -> str | None:
+    """Return Signal phone for any user, including SIGNAL_USER_MAP users whose user_id is their Telegram ID."""
+    from config import Config
+    for phone, tid in Config.SIGNAL_USER_MAP.items():
+        if tid == user_id:
+            return phone
+    return await get_signal_phone_by_user_id(user_id)

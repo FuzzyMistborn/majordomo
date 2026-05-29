@@ -28,6 +28,28 @@ _KNOWN_TOOLS: frozenset[str] = frozenset(
 _personality_cache: dict[str, str] = {}
 _PERSONALITY_SETTING_KEY = "personality"
 _DEFAULT_PERSONALITY = "wit"
+
+_REMINDER_PLATFORM_SETTING_KEY = "reminder_platform"
+_REMINDER_PLATFORM_SET_RE = re.compile(
+    r'(?:set|send|deliver|route|direct|have|want|get|receive|push)\b.{0,50}?'
+    r'reminder(?:s|s?\s+(?:notification|alert|delivery|preference|destination))?\b'
+    r'.{0,40}?(?:to|via|on|through)\s+(?P<platform>telegram|signal)\b'
+    r'|'
+    r'reminder(?:s|s?\s+(?:notification|alert|delivery|preference|destination))?\b'
+    r'.{0,30}?(?:go|goes|sent|delivered|come|comes)?\s*(?:only\s+)?(?:to|via|on)\s+(?P<platform2>telegram|signal)\b',
+    re.IGNORECASE,
+)
+_REMINDER_PLATFORM_GET_RE = re.compile(
+    r'\b(?:where|which\s+(?:app|platform|chat)|what\s+(?:app|platform|chat))\b'
+    r'.{0,50}?\breminders?\b.{0,30}?\b(?:go|sent|delivered|received|come)\b'
+    r'|\breminder\s+(?:platform|delivery|destination|preference)\b',
+    re.IGNORECASE,
+)
+_REMINDER_PLATFORM_CLEAR_RE = re.compile(
+    r'\b(?:clear|reset|remove|delete|unset)\b.{0,50}?\breminder\s+(?:platform|delivery|preference|destination)\b'
+    r'|\b(?:default|automatic|auto)\b.{0,40}?\breminder\s+(?:platform|delivery|destination)\b',
+    re.IGNORECASE,
+)
 _PERSONALITY_LIST_RE = re.compile(
     r"\b(?:list|show)\b.{0,40}\bpersonalit(?:y|ies)\b|"
     r"\b(?:what|which)\s+personalit(?:y|ies)\s+(?:are\s+)?(?:available|configured|installed)\b",
@@ -975,6 +997,33 @@ async def chat(user_id: int, user_message: str, smart_reminder: bool = False) ->
                 reply = direct_val
                 _history[user_id].append({"role": "assistant", "content": reply})
                 return reply
+
+    # Reminder platform preference — set/get/clear which chat receives reminder notifications.
+    # Handled before _skip so users can always configure delivery from either platform.
+    _rp_set = _REMINDER_PLATFORM_SET_RE.search(user_message)
+    if _rp_set:
+        _rp_platform = (_rp_set.group("platform") or _rp_set.group("platform2") or "").lower()
+        if _rp_platform in ("telegram", "signal"):
+            await db.save_user_setting(user_id, _REMINDER_PLATFORM_SETTING_KEY, _rp_platform)
+            logger.info(f"Reminder platform set to {_rp_platform!r} for user {user_id}")
+            reply = f"Got it. Your reminder notifications will be sent to {_rp_platform.capitalize()}."
+            _history[user_id].append({"role": "assistant", "content": reply})
+            return reply
+
+    if _REMINDER_PLATFORM_GET_RE.search(user_message):
+        _rp_current = await db.get_user_setting(user_id, _REMINDER_PLATFORM_SETTING_KEY)
+        if _rp_current:
+            reply = f"Your reminder notifications are set to go to {_rp_current.capitalize()}."
+        else:
+            reply = "No reminder platform preference is set — reminders go to whichever platform you used to create them."
+        _history[user_id].append({"role": "assistant", "content": reply})
+        return reply
+
+    if _REMINDER_PLATFORM_CLEAR_RE.search(user_message):
+        await db.delete_user_setting(user_id, _REMINDER_PLATFORM_SETTING_KEY)
+        reply = "Reminder platform preference cleared. Reminders will now go to whichever platform created them."
+        _history[user_id].append({"role": "assistant", "content": reply})
+        return reply
 
     # Pre-model intercepts: bypass the model entirely for queries we can always handle
     # deterministically. This prevents hallucination and prompt-injection contamination.

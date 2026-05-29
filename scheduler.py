@@ -20,6 +20,7 @@ _scheduler: AsyncIOScheduler | None = None
 # user_id -> reminder_id of the most recently fired reminder (in-memory, lost on restart)
 _last_fired: dict[int, int] = {}
 _LAST_FIRED_SETTING_KEY = "last_fired_reminder_id"
+REMINDER_PLATFORM_KEY = "reminder_platform"
 
 
 async def get_last_fired_reminder_id_persistent(user_id: int) -> int | None:
@@ -50,12 +51,7 @@ def get_scheduler() -> AsyncIOScheduler:
     return _scheduler
 
 
-async def _send_message(user_id: int, text: str):
-    phone = await db.get_signal_phone_by_user_id(user_id)
-    if phone:
-        from services import signal as signal_svc
-        await signal_svc.send_message(phone, text)
-        return
+async def _send_via_telegram(user_id: int, text: str) -> None:
     if _bot is None:
         logger.error("Bot not set in scheduler, cannot send message to user %s.", user_id)
         return
@@ -64,6 +60,39 @@ async def _send_message(user_id: int, text: str):
             await _bot.send_message(chat_id=user_id, text=text[i:i + 4096])
     except Exception as e:
         logger.error(f"Failed to send Telegram message to {user_id}: {e}")
+
+
+async def _send_message(user_id: int, text: str):
+    platform = await db.get_user_setting(user_id, REMINDER_PLATFORM_KEY)
+
+    if platform == "telegram":
+        # If this is a Signal-only user (ID in signal_users table), we have no Telegram ID for them.
+        signal_phone = await db.get_signal_phone_by_user_id(user_id)
+        if signal_phone:
+            logger.warning("reminder_platform=telegram but user %s is Signal-only; falling back to Signal", user_id)
+            from services import signal as signal_svc
+            await signal_svc.send_message(signal_phone, text)
+        else:
+            await _send_via_telegram(user_id, text)
+        return
+
+    if platform == "signal":
+        phone = await db.get_signal_phone_for_user(user_id)
+        if phone:
+            from services import signal as signal_svc
+            await signal_svc.send_message(phone, text)
+            return
+        logger.warning("reminder_platform=signal but no Signal phone found for user %s; falling back to Telegram", user_id)
+        await _send_via_telegram(user_id, text)
+        return
+
+    # Default: Signal if the user has a Signal phone, else Telegram.
+    phone = await db.get_signal_phone_by_user_id(user_id)
+    if phone:
+        from services import signal as signal_svc
+        await signal_svc.send_message(phone, text)
+        return
+    await _send_via_telegram(user_id, text)
 
 
 async def _run_smart_reminder(reminder_id: int, user_id: int, instruction: str):
