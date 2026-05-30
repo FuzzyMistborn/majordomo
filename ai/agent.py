@@ -1333,6 +1333,16 @@ async def chat(user_id: int, user_message: str, smart_reminder: bool = False) ->
 
     messages = [{"role": "system", "content": _system_prompt(memories, personality_name)}] + _history[user_id]
 
+    if smart_reminder:
+        _rl_result = await handle_tool_call("reminder_list", {}, user_id)
+        _rl_id = "smart_briefing_rl"
+        messages.append({
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": _rl_id, "type": "function", "function": {"name": "reminder_list", "arguments": "{}"}}],
+        })
+        messages.append({"role": "tool", "tool_call_id": _rl_id, "content": _rl_result})
+
     MAX_ITERATIONS = 8
     _reminder_fallback_tried = False
     for iteration in range(MAX_ITERATIONS):
