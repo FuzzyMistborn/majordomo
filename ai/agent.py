@@ -934,8 +934,9 @@ async def chat(user_id: int, user_message: str, smart_reminder: bool = False) ->
     logger.info(f"chat() called for user {user_id}: {user_message[:80]!r}")
     grounded = _inject_date_context(user_message)
     grounded_dates = _extract_date_parts(grounded)
-    _history[user_id].append({"role": "user", "content": grounded})
-    _trim_history(user_id)
+    if not smart_reminder:
+        _history[user_id].append({"role": "user", "content": grounded})
+        _trim_history(user_id)
     _memory_saved = False
 
     memories = await db.get_memories(user_id)
@@ -1331,17 +1332,21 @@ async def chat(user_id: int, user_message: str, smart_reminder: bool = False) ->
         _history[user_id].append({"role": "assistant", "content": reply})
         return reply
 
-    messages = [{"role": "system", "content": _system_prompt(memories, personality_name)}] + _history[user_id]
-
     if smart_reminder:
         _rl_result = await handle_tool_call("reminder_list", {}, user_id)
         _rl_id = "smart_briefing_rl"
-        messages.append({
-            "role": "assistant",
-            "content": None,
-            "tool_calls": [{"id": _rl_id, "type": "function", "function": {"name": "reminder_list", "arguments": "{}"}}],
-        })
-        messages.append({"role": "tool", "tool_call_id": _rl_id, "content": _rl_result})
+        messages = [
+            {"role": "system", "content": _system_prompt(memories, personality_name)},
+            {"role": "user", "content": grounded},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": _rl_id, "type": "function", "function": {"name": "reminder_list", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": _rl_id, "content": _rl_result},
+        ]
+    else:
+        messages = [{"role": "system", "content": _system_prompt(memories, personality_name)}] + _history[user_id]
 
     MAX_ITERATIONS = 8
     _reminder_fallback_tried = False
@@ -1482,7 +1487,8 @@ async def chat(user_id: int, user_message: str, smart_reminder: bool = False) ->
                         )
                         quip = await _personality_quip(fallback_result, "this reminder that was just set", user_id)
                         reply = quip if quip else fallback_result
-                        _history[user_id].append({"role": "assistant", "content": reply})
+                        if not smart_reminder:
+                            _history[user_id].append({"role": "assistant", "content": reply})
                         return reply
                     else:
                         logger.info("Reminder fallback: could not parse time/message from request")
@@ -1506,7 +1512,8 @@ async def chat(user_id: int, user_message: str, smart_reminder: bool = False) ->
                         content = "That one eluded me entirely. Try rephrasing — I'm usually better than this."
                 except json.JSONDecodeError:
                     pass
-            _history[user_id].append({"role": "assistant", "content": content})
+            if not smart_reminder:
+                _history[user_id].append({"role": "assistant", "content": content})
             return content
 
         # Append the assistant's tool-call message to conversation
@@ -1552,24 +1559,24 @@ async def chat(user_id: int, user_message: str, smart_reminder: bool = False) ->
 
             # Return certain results directly to prevent model reformatting / greeting preamble
             # Use _resolved_name so aliases (e.g. get_list → shopping_get_list) are caught too.
-            if _resolved_name == "list_get_items" and len(tool_calls) == 1:
+            if _resolved_name == "list_get_items" and len(tool_calls) == 1 and not smart_reminder:
                 _history[user_id].append({"role": "assistant", "content": result})
                 return result
 
-            if _resolved_name == "reminder_list" and len(tool_calls) == 1:
+            if _resolved_name == "reminder_list" and len(tool_calls) == 1 and not smart_reminder:
                 _history[user_id].append({"role": "assistant", "content": result})
                 return result
 
-            if _resolved_name == "get_calendar_events" and len(tool_calls) == 1:
+            if _resolved_name == "get_calendar_events" and len(tool_calls) == 1 and not smart_reminder:
                 reply = "**\U0001f4c5 Calendar events:**\n\n" + result
                 _history[user_id].append({"role": "assistant", "content": reply})
                 return reply
 
-            if _resolved_name == "shopping_get_list" and len(tool_calls) == 1 and fn_args.get("list_name"):
+            if _resolved_name == "shopping_get_list" and len(tool_calls) == 1 and fn_args.get("list_name") and not smart_reminder:
                 _history[user_id].append({"role": "assistant", "content": result})
                 return result
 
-            if _resolved_name == "shopping_get_meal_plan" and len(tool_calls) == 1:
+            if _resolved_name == "shopping_get_meal_plan" and len(tool_calls) == 1 and not smart_reminder:
                 quip = await _personality_quip(result, user_id=user_id)
                 reply = result + ("\n\n" + quip if quip else "")
                 _history[user_id].append({"role": "assistant", "content": reply})
@@ -1584,7 +1591,8 @@ async def chat(user_id: int, user_message: str, smart_reminder: bool = False) ->
 
     # Fallback if we hit max iterations
     fallback = "That took more effort than it should have, and I still came up short. Try rephrasing."
-    _history[user_id].append({"role": "assistant", "content": fallback})
+    if not smart_reminder:
+        _history[user_id].append({"role": "assistant", "content": fallback})
     return fallback
 
 
