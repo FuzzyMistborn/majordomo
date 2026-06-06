@@ -24,6 +24,7 @@ services:
       - HA_TOKEN=${HA_TOKEN:-}
       - HA_ALLOWED_DOMAINS=${HA_ALLOWED_DOMAINS:-light,switch,input_boolean,script,automation,climate,cover,fan,media_player}
       - HA_WEATHER_ENTITY=${HA_WEATHER_ENTITY:-}
+      - HA_WEATHER_SUMMARY_ENTITY=${HA_WEATHER_SUMMARY_ENTITY:-}
 
       # ── CalDAV (optional) ─────────────────────────────────────────────────
       - CALDAV_URL=${CALDAV_URL:-}
