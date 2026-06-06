@@ -1092,6 +1092,8 @@ async def handle_tool_call(name: str, args: dict, user_id: int) -> str:
                     f"Humidity: {humidity}",
                     f"Wind: {wind}",
                 ]
+                if weather.get("summary"):
+                    lines.append(f"Summary: {weather['summary']}")
                 forecast = weather.get("forecast", [])
                 if forecast:
                     lines.append("Forecast:")

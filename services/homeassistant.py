@@ -105,6 +105,16 @@ async def get_weather() -> dict:
         )
         resp.raise_for_status()
         data = resp.json()
+
+        summary = None
+        if Config.HA_WEATHER_SUMMARY_ENTITY:
+            summary_resp = await client.get(
+                f"{_base()}/api/states/{Config.HA_WEATHER_SUMMARY_ENTITY}",
+                headers=_headers(),
+            )
+            if summary_resp.status_code == 200:
+                summary = summary_resp.json().get("state")
+
     attrs = data.get("attributes", {})
     result = {
         "condition": data.get("state", "unknown"),
@@ -115,6 +125,8 @@ async def get_weather() -> dict:
         "wind_speed_unit": attrs.get("wind_speed_unit", ""),
         "friendly_name": attrs.get("friendly_name", Config.HA_WEATHER_ENTITY),
     }
+    if summary:
+        result["summary"] = summary
     # Include today's forecast entries if available
     forecast = attrs.get("forecast", [])
     if forecast:

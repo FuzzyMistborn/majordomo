@@ -86,6 +86,7 @@ class Config:
     ]
 
     HA_WEATHER_ENTITY: str = os.environ.get("HA_WEATHER_ENTITY", "")
+    HA_WEATHER_SUMMARY_ENTITY: str = os.environ.get("HA_WEATHER_SUMMARY_ENTITY", "")
 
     # CalDAV
     CALDAV_URL: str = os.environ.get("CALDAV_URL", "")
